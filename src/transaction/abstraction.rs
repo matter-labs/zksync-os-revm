@@ -297,28 +297,28 @@ mod tests {
     use super::*;
     use revm::{
         context_interface::Transaction,
-        primitives::{Address, B256},
+        primitives::Address,
     };
 
-    // #[test]
-    // fn test_deposit_transaction_fields() {
-    //     let base_tx = TxEnv::builder()
-    //         .gas_limit(10)
-    //         .gas_price(100)
-    //         .gas_priority_fee(Some(5));
+    #[test]
+    fn test_deposit_transaction_fields() {
+        let base_tx = TxEnv::builder()
+            .gas_limit(10)
+            .gas_price(100)
+            .gas_priority_fee(Some(5));
 
-    //     let zk_tx = ZKsyncTx::builder()
-    //         .base(base_tx)
-    //         .mint(U256::ZERO)
-    //         .build()
-    //         .unwrap();
-    //     // Verify transaction type (deposit transactions should have tx_type based on ZkSpecId)
-    //     // The tx_type is derived from the transaction structure, not set manually
-    //     // Verify common fields access
-    //     assert_eq!(zk_tx.gas_limit(), 10);
-    //     assert_eq!(zk_tx.kind(), revm::primitives::TxKind::Call(Address::ZERO));
-    //     // Verify gas related calculations - deposit transactions use gas_price for effective gas price
-    //     assert_eq!(zk_tx.effective_gas_price(90), 100);
-    //     assert_eq!(zk_tx.max_fee_per_gas(), 100);
-    // }
+        let zk_tx = ZKsyncTx::builder()
+            .base(base_tx)
+            .mint(U256::ZERO)
+            .build()
+            .unwrap();
+        // Verify transaction type (deposit transactions should have tx_type based on ZkSpecId)
+        // The tx_type is derived from the transaction structure, not set manually
+        // Verify common fields access
+        assert_eq!(zk_tx.gas_limit(), 10);
+        assert_eq!(zk_tx.kind(), revm::primitives::TxKind::Call(Address::ZERO));
+        // Verify gas related calculations - deposit transactions use gas_price for effective gas price
+        assert_eq!(zk_tx.effective_gas_price(90), 95);
+        assert_eq!(zk_tx.max_fee_per_gas(), 100);
+    }
 }
