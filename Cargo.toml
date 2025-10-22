@@ -1,7 +1,13 @@
 [package]
 name = "zksync-os-revm"
+authors = ["The Matter Labs Team <hello@matterlabs.dev>"]
+homepage = "https://zksync.io/"
+repository = "https://github.com/matter-labs/zksync-os-revm"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+keywords = ["blockchain", "zksync"]
+categories = ["cryptography"]
 
 [dependencies]
 revm = { version = "=29.0.0", features = ["optional_balance_check"] }
