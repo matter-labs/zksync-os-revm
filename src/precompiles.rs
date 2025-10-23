@@ -1,7 +1,7 @@
 //! Contains ZKsync OS specific precompiles.
 use crate::ZkSpecId;
 use revm::{
-    context::{Cfg, LocalContextTr},
+    context::Cfg,
     context_interface::ContextTr,
     handler::{EthPrecompiles, PrecompileProvider},
     interpreter::{InputsImpl, InterpreterResult},
@@ -10,7 +10,7 @@ use revm::{
 };
 use std::boxed::Box;
 use std::string::String;
-use std::vec;
+pub mod calldata_view;
 pub mod deployer;
 pub mod l1_messenger;
 pub mod l2_base_token;
@@ -93,43 +93,20 @@ where
         is_static: bool,
         gas_limit: u64,
     ) -> Result<Option<Self::Output>, String> {
-        // Closure to get vector calldata bytes
-        let get_input_bytes = || match &inputs.input {
-            revm::interpreter::CallInput::SharedBuffer(range) => {
-                if let Some(slice) = context.local().shared_memory_buffer_slice(range.clone()) {
-                    slice.to_vec()
-                } else {
-                    vec![]
-                }
-            }
-            revm::interpreter::CallInput::Bytes(bytes) => bytes.0.to_vec(),
-        };
+        // If the code is loaded from different account it is a delegatecall
+        let delegate =
+            matches!(inputs.bytecode_address, Some(addr) if addr != inputs.target_address);
         if *address == CONTRACT_DEPLOYER_ADDRESS {
             return Ok(Some(deployer_precompile_call(
-                context,
-                inputs.caller_address,
-                is_static,
-                gas_limit,
-                inputs.call_value,
-                &get_input_bytes(),
+                context, inputs, is_static, delegate, gas_limit,
             )));
         } else if *address == L1_MESSENGER_ADDRESS {
             return Ok(Some(l1_messenger_precompile_call(
-                context,
-                inputs.caller_address,
-                is_static,
-                gas_limit,
-                inputs.call_value,
-                &get_input_bytes(),
+                context, inputs, is_static, delegate, gas_limit,
             )));
         } else if *address == L2_BASE_TOKEN_ADDRESS {
             return Ok(Some(l2_base_token_precompile_call(
-                context,
-                inputs.caller_address,
-                is_static,
-                gas_limit,
-                inputs.call_value,
-                &get_input_bytes(),
+                context, inputs, is_static, delegate, gas_limit,
             )));
         }
 

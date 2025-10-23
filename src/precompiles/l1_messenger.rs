@@ -1,16 +1,17 @@
+use std::vec::Vec;
+
 use revm::{
     context::{Cfg, JournalTr},
     context_interface::ContextTr,
     interpreter::{
-        Gas, InstructionResult, InterpreterResult,
+        Gas, InputsImpl, InstructionResult, InterpreterResult,
         gas::{KECCAK256, KECCAK256WORD, LOG, LOGDATA, LOGTOPIC},
     },
     primitives::{Address, B256, Bytes, Log, LogData, U256, address, keccak256},
 };
-use std::vec;
-use std::vec::Vec;
 
 use crate::ZkSpecId;
+use crate::precompiles::calldata_view::CalldataView;
 
 // sendToL1(bytes) - 62f84b24
 pub const SEND_TO_L1_SELECTOR: &[u8] = &[0x62, 0xf8, 0x4b, 0x24];
@@ -29,130 +30,142 @@ fn b160_to_b256(addr: Address) -> B256 {
     B256::from(out)
 }
 
-/// Run the L1 messenger precompile.
-pub fn l1_messenger_precompile_call<CTX>(
+pub(crate) fn send_to_l1_inner<CTX>(
     ctx: &mut CTX,
+    gas: &mut Gas,
+    abi_encoded_message: Vec<u8>,
     caller: Address,
-    is_static: bool,
-    gas_limit: u64,
-    call_value: U256,
-    mut calldata: &[u8],
 ) -> InterpreterResult
 where
     CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
 {
-    let mut gas = Gas::new(gas_limit);
-    let oog_error = || InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
-    let error = move || InterpreterResult::new(InstructionResult::Revert, [].into(), gas);
+    let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
+    let data = abi_encoded_message.as_slice();
 
-    if !gas.record_cost(10) {
-        return oog_error();
+    let abi_encoded_message_len: u32 = match data.len().try_into() {
+        Ok(len) => len,
+        Err(_) => return revert(*gas),
+    };
+
+    if abi_encoded_message_len < 32 {
+        return revert(*gas);
+    }
+
+    let message_offset: u32 = match U256::from_be_slice(&data[..32]).try_into() {
+        Ok(offset) => offset,
+        Err(_) => return revert(*gas),
+    };
+
+    if message_offset != 32 {
+        return revert(*gas);
+    }
+
+    let length_encoding_end = match message_offset.checked_add(32) {
+        Some(length_encoding_end) => length_encoding_end,
+        None => return revert(*gas),
+    };
+    if abi_encoded_message_len < length_encoding_end {
+        return revert(*gas);
+    }
+
+    let length: u32 = match U256::from_be_slice(
+        &data[(length_encoding_end as usize) - 32..length_encoding_end as usize],
+    )
+    .try_into()
+    {
+        Ok(length) => length,
+        Err(_) => return revert(*gas),
+    };
+
+    let message_end = match length_encoding_end.checked_add(length) {
+        Some(message_end) => message_end,
+        None => return revert(*gas),
+    };
+    if abi_encoded_message_len < message_end {
+        return revert(*gas);
+    }
+
+    if !abi_encoded_message_len.is_multiple_of(32) {
+        return revert(*gas);
+    }
+    let message = &data[(length_encoding_end as usize)..message_end as usize];
+    let words = (message.len() as u64).div_ceil(32);
+    let keccak256_gas = KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(words));
+    let log_gas = LOG
+        .saturating_add(LOGTOPIC.saturating_mul(3))
+        .saturating_add(LOGDATA.saturating_mul(message.len() as u64));
+    let needed_gas = keccak256_gas + log_gas;
+    if !gas.record_cost(needed_gas) {
+        // Out-of-gas error
+        return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
+    }
+
+    let message_hash = keccak256(message);
+    let log = Log {
+        address: L1_MESSENGER_ADDRESS,
+        data: LogData::new_unchecked(
+            vec![
+                B256::from_slice(&L1_MESSAGE_SENT_TOPIC),
+                b160_to_b256(caller),
+                message_hash,
+            ],
+            Bytes::from(abi_encoded_message),
+        ),
+    };
+    ctx.journal_mut().log(log);
+
+    // TODO: save L2 -> L1 message in a context of block
+
+    InterpreterResult::new(InstructionResult::Return, message_hash.into(), *gas)
+}
+
+/// Run the L1 messenger precompile.
+pub fn l1_messenger_precompile_call<CTX>(
+    ctx: &mut CTX,
+    inputs: &InputsImpl,
+    is_static: bool,
+    is_delegate: bool,
+    gas_limit: u64,
+) -> InterpreterResult
+where
+    CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
+{
+    let view = CalldataView::new(ctx, &inputs.input);
+    let calldata = view.as_slice();
+    let caller = inputs.caller_address;
+    let call_value = inputs.call_value;
+    let mut gas = Gas::new(gas_limit);
+    let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
+    // Mirror the same behaviour as on ZKsync OS
+    if is_delegate || call_value != U256::ZERO {
+        return revert(gas);
+    }
+
+    // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
+    // Also, in the current version of ZKsync OS, this precompile charges 10 ergs,
+    // which is a fraction of gas. Here we charge exactly 1 gas for simplicity,
+    // as it will be fixed with proper gas charging.
+    if !gas.record_cost(1) {
+        // Out-of-gas error
+        return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
+    }
+
+    // Check after charging the gas
+    if is_static {
+        return revert(gas);
     }
 
     if calldata.len() < 4 {
-        return error();
+        return revert(gas);
     }
     let mut selector = [0u8; 4];
     selector.copy_from_slice(&calldata[..4]);
     match selector {
         s if s == SEND_TO_L1_SELECTOR => {
-            if call_value != U256::ZERO {
-                return error();
-            }
-            if is_static {
-                return error();
-            }
-
-            // decoding according to setDeployedCodeEVM(address,bytes)
-            calldata = &calldata[4..];
-            let abi_encoded_message_len: u32 = match calldata.len().try_into() {
-                Ok(len) => len,
-                Err(_) => {
-                    return error();
-                }
-            };
-
-            if abi_encoded_message_len < 32 {
-                return error();
-            }
-
-            let message_offset: u32 = match U256::from_be_slice(&calldata[..32]).try_into() {
-                Ok(offset) => offset,
-                Err(_) => {
-                    return error();
-                }
-            };
-
-            // Note, that in general, Solidity allows to have non-strict offsets, i.e. it should be possible
-            // to call a function with offset pointing to a faraway point in calldata. However,
-            // when explicitly calling a contract Solidity encodes it via a strict encoding and allowing
-            // only standard encoding here allows for cheaper and easier implementation.
-            if message_offset != 32 {
-                return error();
-            }
-            // length located at message_offset..message_offset+32
-            // we want to check that message_offset+32 will not overflow u32
-            let length_encoding_end = match message_offset.checked_add(32) {
-                Some(length_encoding_end) => length_encoding_end,
-                None => {
-                    return error();
-                }
-            };
-            if abi_encoded_message_len < length_encoding_end {
-                return error();
-            }
-            let length: u32 = match U256::from_be_slice(
-                &calldata[(length_encoding_end as usize) - 32..length_encoding_end as usize],
-            )
-            .try_into()
-            {
-                Ok(length) => length,
-                Err(_) => {
-                    return error();
-                }
-            };
-            // to check that it will not overflow
-            let message_end = match length_encoding_end.checked_add(length) {
-                Some(message_end) => message_end,
-                None => {
-                    return error();
-                }
-            };
-            if abi_encoded_message_len < message_end {
-                return error();
-            }
-            // Note, that in general, Solidity allows to have non-strict offsets, i.e. it should be possible
-            // to call a function with offset pointing to a faraway point in calldata. However,
-            // when explicitly calling a contract Solidity encodes it via a strict encoding and allowing
-            // only standard encoding here allows for cheaper and easier implementation.
-            if !abi_encoded_message_len.is_multiple_of(32) {
-                return error();
-            }
-
-            let message = &calldata[(length_encoding_end as usize)..message_end as usize];
-            let words = (message.len() as u64).div_ceil(32);
-            let keccak256_gas = KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(words));
-            let log_gas = LOG
-                .saturating_add(LOGTOPIC.saturating_mul(3))
-                // no data payload, but include formula for completeness:
-                .saturating_add(LOGDATA.saturating_mul(message.len() as u64));
-            let needed_gas = keccak256_gas + log_gas;
-            if !gas.record_cost(needed_gas) {
-                return oog_error();
-            }
-            let message_hash = keccak256(message);
-            let topics = vec![
-                B256::from_slice(&L1_MESSAGE_SENT_TOPIC),
-                b160_to_b256(caller),
-                message_hash,
-            ];
-            let log = Log {
-                address: L1_MESSENGER_ADDRESS,
-                data: LogData::new_unchecked(topics, Bytes::from(Vec::from(calldata))),
-            };
-            ctx.journal_mut().log(log);
-            InterpreterResult::new(InstructionResult::Return, message_hash.into(), gas)
+            let call_payload = Vec::from(&calldata[4..]);
+            drop(view);
+            send_to_l1_inner(ctx, &mut gas, call_payload, caller)
         }
-        _ => error(),
+        _ => revert(gas),
     }
 }
