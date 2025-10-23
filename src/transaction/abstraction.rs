@@ -295,10 +295,7 @@ impl From<TxEnvBuildError> for ZkBuilderror {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use revm::{
-        context_interface::Transaction,
-        primitives::Address,
-    };
+    use revm::{context_interface::Transaction, primitives::Address};
 
     #[test]
     fn test_deposit_transaction_fields() {
