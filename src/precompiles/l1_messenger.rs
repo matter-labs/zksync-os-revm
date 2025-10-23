@@ -5,7 +5,6 @@ use revm::{
     context_interface::ContextTr,
     interpreter::{
         Gas, InputsImpl, InstructionResult, InterpreterResult,
-        gas::{KECCAK256, KECCAK256WORD, LOG, LOGDATA, LOGTOPIC},
     },
     primitives::{Address, B256, Bytes, Log, LogData, U256, address, keccak256},
 };
@@ -89,16 +88,18 @@ where
         return revert(*gas);
     }
     let message = &data[(length_encoding_end as usize)..message_end as usize];
-    let words = (message.len() as u64).div_ceil(32);
-    let keccak256_gas = KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(words));
-    let log_gas = LOG
-        .saturating_add(LOGTOPIC.saturating_mul(3))
-        .saturating_add(LOGDATA.saturating_mul(message.len() as u64));
-    let needed_gas = keccak256_gas + log_gas;
-    if !gas.record_cost(needed_gas) {
-        // Out-of-gas error
-        return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
-    }
+    
+    // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
+    // let words = (message.len() as u64).div_ceil(32);
+    // let keccak256_gas = KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(words));
+    // let log_gas = LOG
+    //     .saturating_add(LOGTOPIC.saturating_mul(3))
+    //     .saturating_add(LOGDATA.saturating_mul(message.len() as u64));
+    // let needed_gas = keccak256_gas + log_gas;
+    // if !gas.record_cost(needed_gas) {
+    //     // Out-of-gas error
+    //     return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
+    // }
 
     let message_hash = keccak256(message);
     let log = Log {
