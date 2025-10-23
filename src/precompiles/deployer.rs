@@ -115,7 +115,6 @@ where
             ctx.journal_mut()
                 .warm_account(address)
                 .expect("warm account");
-            // TODO: there is other gas we need to charge for the deployment
             ctx.journal_mut().set_code(address, bytecode_padded);
             InterpreterResult::new(InstructionResult::Return, [].into(), gas)
         }
