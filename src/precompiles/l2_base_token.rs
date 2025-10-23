@@ -40,7 +40,7 @@ where
     let oog_error = || InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
     // Mirror the same behaviour as on ZKsync OS
-    if is_delegate || call_value != U256::ZERO {
+    if is_delegate {
         return revert(gas);
     }
 
