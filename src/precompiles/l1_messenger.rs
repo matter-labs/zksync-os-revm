@@ -3,9 +3,7 @@ use std::vec::Vec;
 use revm::{
     context::{Cfg, JournalTr},
     context_interface::ContextTr,
-    interpreter::{
-        Gas, InputsImpl, InstructionResult, InterpreterResult,
-    },
+    interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
     primitives::{Address, B256, Bytes, Log, LogData, U256, address, keccak256},
 };
 
@@ -88,7 +86,7 @@ where
         return revert(*gas);
     }
     let message = &data[(length_encoding_end as usize)..message_end as usize];
-    
+
     // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
     // let words = (message.len() as u64).div_ceil(32);
     // let keccak256_gas = KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(words));
