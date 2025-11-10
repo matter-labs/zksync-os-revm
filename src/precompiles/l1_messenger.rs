@@ -1,17 +1,17 @@
-use std::{ops::Mul, vec::Vec};
+use std::vec::Vec;
 
 use revm::{
     context::{Cfg, JournalTr},
     context_interface::ContextTr,
-    interpreter::{
-        Gas, InputsImpl, InstructionResult, InterpreterResult,
-        gas::{KECCAK256, KECCAK256WORD, LOG, LOGDATA, LOGTOPIC},
-    },
+    interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
     primitives::{Address, B256, Bytes, Log, LogData, U256, address, keccak256},
 };
 
-use crate::ZkSpecId;
 use crate::precompiles::calldata_view::CalldataView;
+use crate::{
+    ZkSpecId,
+    precompiles::gas_cost::{HOOK_BASE_GAS_COST, l1_message_gas_cost, log_gas_cost},
+};
 
 // sendToL1(bytes) - 62f84b24
 pub const SEND_TO_L1_SELECTOR: &[u8] = &[0x62, 0xf8, 0x4b, 0x24];
@@ -142,7 +142,7 @@ where
     }
 
     // Charge base cost for calling system hook
-    if !gas.record_cost(100) {
+    if !gas.record_cost(HOOK_BASE_GAS_COST) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }
@@ -165,25 +165,4 @@ where
         }
         _ => revert(gas),
     }
-}
-
-fn keccak256_gas_cost(len: usize) -> u64 {
-    let words = len.div_ceil(32);
-    let gas_cost = KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(words as u64));
-    gas_cost
-}
-
-fn l1_message_gas_cost(message_len: usize) -> u64 {
-    let hashing_cost = keccak256_gas_cost(L2_TO_L1_LOG_SERIALIZE_SIZE)
-        + keccak256_gas_cost(64).mul(3)
-        + keccak256_gas_cost(message_len);
-    let log_cost = LOG + LOGDATA * message_len as u64;
-    hashing_cost + log_cost
-}
-
-fn log_gas_cost(topics: u64, data: u64) -> u64 {
-    let static_cost = LOG;
-    let topic_cost = LOGTOPIC * topics;
-    let len_cost = data * LOGDATA;
-    static_cost + topic_cost + len_cost
 }

@@ -7,8 +7,8 @@ use revm::{
     state::Bytecode,
 };
 
-use crate::ZkSpecId;
 use crate::precompiles::calldata_view::CalldataView;
+use crate::{ZkSpecId, precompiles::gas_cost::HOOK_BASE_GAS_COST};
 
 // setBytecodeDetailsEVM(address,bytes32,uint32,bytes32) - f6eca0b0
 pub const SET_EVM_BYTECODE_DETAILS: &[u8] = &[0xf6, 0xec, 0xa0, 0xb0];
@@ -48,7 +48,7 @@ where
     }
 
     // Charge base cost for calling system hook
-    if !gas.record_cost(100) {
+    if !gas.record_cost(HOOK_BASE_GAS_COST) {
         return oog_error();
     }
 

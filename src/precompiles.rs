@@ -12,6 +12,7 @@ use std::boxed::Box;
 use std::string::String;
 pub mod calldata_view;
 pub mod deployer;
+pub mod gas_cost;
 pub mod l1_messenger;
 pub mod l2_base_token;
 
