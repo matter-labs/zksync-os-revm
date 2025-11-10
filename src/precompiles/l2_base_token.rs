@@ -9,7 +9,7 @@ use revm::{
 };
 
 use super::l1_messenger::send_to_l1_inner;
-use crate::precompiles::calldata_view::CalldataView;
+use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
 use crate::{
     ZkSpecId,
     precompiles::gas_cost::{HOOK_BASE_GAS_COST, log_gas_cost},
@@ -331,11 +331,4 @@ where
     }
 
     result
-}
-
-#[inline(always)]
-fn b160_to_b256(addr: Address) -> B256 {
-    let mut out = [0u8; 32];
-    out[12..].copy_from_slice(addr.as_slice()); // pad left, store address in low 20 bytes
-    B256::from(out)
 }

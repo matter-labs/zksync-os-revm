@@ -7,7 +7,7 @@ use revm::{
     primitives::{Address, B256, Bytes, Log, LogData, U256, address, keccak256},
 };
 
-use crate::precompiles::calldata_view::CalldataView;
+use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
 use crate::{
     ZkSpecId,
     precompiles::gas_cost::{HOOK_BASE_GAS_COST, l1_message_gas_cost, log_gas_cost},
@@ -24,13 +24,6 @@ const L1_MESSAGE_SENT_TOPIC: [u8; 32] = [
 pub const L1_MESSENGER_ADDRESS: Address = address!("0000000000000000000000000000000000008008");
 
 pub const L2_TO_L1_LOG_SERIALIZE_SIZE: usize = 88;
-
-#[inline(always)]
-fn b160_to_b256(addr: Address) -> B256 {
-    let mut out = [0u8; 32];
-    out[12..].copy_from_slice(addr.as_slice()); // pad left, store address in low 20 bytes
-    B256::from(out)
-}
 
 pub(crate) fn send_to_l1_inner<CTX>(
     ctx: &mut CTX,

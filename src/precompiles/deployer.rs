@@ -7,7 +7,7 @@ use revm::{
     state::Bytecode,
 };
 
-use crate::precompiles::calldata_view::CalldataView;
+use crate::precompiles::{calldata_view::CalldataView, gas_cost::set_bytecode_details_extra_gas};
 use crate::{ZkSpecId, precompiles::gas_cost::HOOK_BASE_GAS_COST};
 
 // setBytecodeDetailsEVM(address,bytes32,uint32,bytes32) - f6eca0b0
@@ -19,9 +19,6 @@ pub const L2_GENESIS_UPGRADE_ADDRESS: Address =
     address!("000000000000000000000000000000000000800f");
 
 pub const MAX_CODE_SIZE: usize = 0x6000;
-
-/// Gas cost per byte of bytecode for force deployments.
-const SET_BYTECODE_DETAILS_EXTRA_GAS_PER_BYTE: u64 = 50;
 
 /// Run the deployer precompile.
 pub fn deployer_precompile_call<CTX>(
@@ -126,8 +123,4 @@ where
         }
         _ => revert(gas),
     }
-}
-
-fn set_bytecode_details_extra_gas(bytecode_len: u64) -> u64 {
-    SET_BYTECODE_DETAILS_EXTRA_GAS_PER_BYTE * bytecode_len
 }

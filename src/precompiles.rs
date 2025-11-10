@@ -12,9 +12,10 @@ use std::boxed::Box;
 use std::string::String;
 pub mod calldata_view;
 pub mod deployer;
-pub mod gas_cost;
+pub(crate) mod gas_cost;
 pub mod l1_messenger;
 pub mod l2_base_token;
+pub(crate) mod utils;
 
 use deployer::{CONTRACT_DEPLOYER_ADDRESS, deployer_precompile_call};
 use l1_messenger::{L1_MESSENGER_ADDRESS, l1_messenger_precompile_call};
