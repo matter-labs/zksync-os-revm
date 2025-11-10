@@ -122,11 +122,12 @@ where
     drop(view);
 
     // Charge gas for the token burning
-    if gas.record_cost(WARM_STORAGE_READ_COST) {
+    if !gas.record_cost(WARM_STORAGE_READ_COST) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }
 
+    ctx.journal_mut().touch_account(L2_BASE_TOKEN_ADDRESS);
     let mut from_account = ctx
         .journal_mut()
         .load_account(L2_BASE_TOKEN_ADDRESS)
@@ -262,11 +263,12 @@ where
     drop(view);
 
     // Charge gas for the token burning
-    if gas.record_cost(WARM_STORAGE_READ_COST) {
+    if !gas.record_cost(WARM_STORAGE_READ_COST) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }
 
+    ctx.journal_mut().touch_account(L2_BASE_TOKEN_ADDRESS);
     let mut from_account = ctx
         .journal_mut()
         .load_account(L2_BASE_TOKEN_ADDRESS)
@@ -324,7 +326,7 @@ where
     ctx.journal_mut().log(log);
 
     // Charge gas for emitting log
-    let gas_cost = log_gas_cost(3, 32);
+    let gas_cost = log_gas_cost(3, abi_encoded_event_length as u64);
     if !gas.record_cost(gas_cost) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));

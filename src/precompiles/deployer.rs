@@ -2,7 +2,10 @@ use revm::{
     Database,
     context::{Cfg, JournalTr},
     context_interface::ContextTr,
-    interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
+    interpreter::{
+        Gas, InputsImpl, InstructionResult, InterpreterResult,
+        gas::{COLD_ACCOUNT_ACCESS_COST, WARM_STORAGE_READ_COST},
+    },
     primitives::{Address, B256, Bytes, U256, address},
     state::Bytecode,
 };
@@ -114,6 +117,20 @@ where
             let bytecode_padded = Bytecode::new_legacy(Bytes::copy_from_slice(
                 &bytecode.original_bytes()[0..bytecode_length as usize],
             ));
+            let account = ctx
+                .journal_mut()
+                .load_account(address)
+                .expect("load account");
+            let gas_for_access = if account.is_cold {
+                COLD_ACCOUNT_ACCESS_COST
+            } else {
+                WARM_STORAGE_READ_COST
+            };
+            // Charge base cost for warm/cold read
+            if !gas.record_cost(gas_for_access) {
+                return oog_error();
+            }
+
             ctx.journal_mut().touch_account(address);
             ctx.journal_mut()
                 .warm_account(address)
