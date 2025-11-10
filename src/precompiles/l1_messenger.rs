@@ -1,9 +1,12 @@
-use std::vec::Vec;
+use std::{ops::Mul, vec::Vec};
 
 use revm::{
     context::{Cfg, JournalTr},
     context_interface::ContextTr,
-    interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
+    interpreter::{
+        Gas, InputsImpl, InstructionResult, InterpreterResult,
+        gas::{KECCAK256, KECCAK256WORD, LOG, LOGDATA, LOGTOPIC},
+    },
     primitives::{Address, B256, Bytes, Log, LogData, U256, address, keccak256},
 };
 
@@ -19,6 +22,8 @@ const L1_MESSAGE_SENT_TOPIC: [u8; 32] = [
 ];
 
 pub const L1_MESSENGER_ADDRESS: Address = address!("0000000000000000000000000000000000008008");
+
+pub const L2_TO_L1_LOG_SERIALIZE_SIZE: usize = 88;
 
 #[inline(always)]
 fn b160_to_b256(addr: Address) -> B256 {
@@ -87,17 +92,13 @@ where
     }
     let message = &data[(length_encoding_end as usize)..message_end as usize];
 
-    // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
-    // let words = (message.len() as u64).div_ceil(32);
-    // let keccak256_gas = KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(words));
-    // let log_gas = LOG
-    //     .saturating_add(LOGTOPIC.saturating_mul(3))
-    //     .saturating_add(LOGDATA.saturating_mul(message.len() as u64));
-    // let needed_gas = keccak256_gas + log_gas;
-    // if !gas.record_cost(needed_gas) {
-    //     // Out-of-gas error
-    //     return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
-    // }
+    // Charge gas for emitting l1 message and log
+    let gas_cost =
+        l1_message_gas_cost(message.len()) + log_gas_cost(3, abi_encoded_message_len as u64);
+    if !gas.record_cost(gas_cost) {
+        // Out-of-gas error
+        return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
+    }
 
     let message_hash = keccak256(message);
     let log = Log {
@@ -140,11 +141,8 @@ where
         return revert(gas);
     }
 
-    // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
-    // Also, in the current version of ZKsync OS, this precompile charges 10 ergs,
-    // which is a fraction of gas. Here we charge exactly 1 gas for simplicity,
-    // as it will be fixed with proper gas charging.
-    if !gas.record_cost(1) {
+    // Charge base cost for calling system hook
+    if !gas.record_cost(100) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }
@@ -167,4 +165,25 @@ where
         }
         _ => revert(gas),
     }
+}
+
+fn keccak256_gas_cost(len: usize) -> u64 {
+    let words = len.div_ceil(32);
+    let gas_cost = KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(words as u64));
+    gas_cost
+}
+
+fn l1_message_gas_cost(message_len: usize) -> u64 {
+    let hashing_cost = keccak256_gas_cost(L2_TO_L1_LOG_SERIALIZE_SIZE)
+        + keccak256_gas_cost(64).mul(3)
+        + keccak256_gas_cost(message_len);
+    let log_cost = LOG + LOGDATA * message_len as u64;
+    hashing_cost + log_cost
+}
+
+fn log_gas_cost(topics: u64, data: u64) -> u64 {
+    let static_cost = LOG;
+    let topic_cost = LOGTOPIC * topics;
+    let len_cost = data * LOGDATA;
+    static_cost + topic_cost + len_cost
 }

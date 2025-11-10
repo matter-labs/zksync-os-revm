@@ -20,6 +20,9 @@ pub const L2_GENESIS_UPGRADE_ADDRESS: Address =
 
 pub const MAX_CODE_SIZE: usize = 0x6000;
 
+/// Gas cost per byte of bytecode for force deployments.
+const SET_BYTECODE_DETAILS_EXTRA_GAS_PER_BYTE: u64 = 50;
+
 /// Run the deployer precompile.
 pub fn deployer_precompile_call<CTX>(
     ctx: &mut CTX,
@@ -44,11 +47,8 @@ where
         return revert(gas);
     }
 
-    // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
-    // Also, in the current version of ZKsync OS, this precompile charges 10 ergs,
-    // which is a fraction of gas. Here we charge exactly 1 gas for simplicity,
-    // as it will be fixed with proper gas charging.
-    if !gas.record_cost(1) {
+    // Charge base cost for calling system hook
+    if !gas.record_cost(100) {
         return oog_error();
     }
 
@@ -104,6 +104,12 @@ where
             // finished reading calldata, release borrow before mutating context
             drop(view);
 
+            // Charge extra gas for `set_bytecode_details`
+            let extra_gas = set_bytecode_details_extra_gas(bytecode_length as u64);
+            if !gas.record_cost(extra_gas) {
+                return oog_error();
+            }
+
             let bytecode = ctx.db_mut().code_by_hash(bytecode_hash).expect(
                 "The bytecode is expected to be pre-loaded for any deployer precompile call",
             );
@@ -120,4 +126,8 @@ where
         }
         _ => revert(gas),
     }
+}
+
+fn set_bytecode_details_extra_gas(bytecode_len: u64) -> u64 {
+    SET_BYTECODE_DETAILS_EXTRA_GAS_PER_BYTE * bytecode_len
 }
