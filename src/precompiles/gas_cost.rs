@@ -16,7 +16,7 @@ pub fn keccak256_gas_cost(len: usize) -> u64 {
 pub fn l1_message_gas_cost(message_len: usize) -> u64 {
     let hashing_cost = keccak256_gas_cost(L2_TO_L1_LOG_SERIALIZE_SIZE)
         + keccak256_gas_cost(64).mul(3)
-        + keccak256_gas_cost(message_len);
+        + 2 * keccak256_gas_cost(message_len);
     let log_cost = LOG + LOGDATA * message_len as u64;
     hashing_cost + log_cost
 }
