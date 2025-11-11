@@ -1,7 +1,7 @@
 use std::vec::Vec;
 
 use revm::{
-    context::{Cfg, ContextTr, JournalTr},
+    context::{ContextTr, JournalTr},
     interpreter::{
         Gas, InputsImpl, InstructionResult, InterpreterResult, gas::WARM_STORAGE_READ_COST,
     },
@@ -9,11 +9,8 @@ use revm::{
 };
 
 use super::l1_messenger::send_to_l1_inner;
+use crate::precompiles::v2::gas_cost::{HOOK_BASE_GAS_COST, log_gas_cost};
 use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
-use crate::{
-    ZkSpecId,
-    precompiles::gas_cost::{HOOK_BASE_GAS_COST, log_gas_cost},
-};
 
 pub const L2_BASE_TOKEN_ADDRESS: Address = address!("000000000000000000000000000000000000800a");
 
@@ -39,16 +36,13 @@ const WITHDRAWAL_WITH_MESSAGE_TOPIC: [u8; 32] = [
 ];
 
 /// Run the L2 base token precompile.
-pub fn l2_base_token_precompile_call<CTX>(
+pub fn l2_base_token_precompile_call<CTX: ContextTr>(
     ctx: &mut CTX,
     inputs: &InputsImpl,
     is_static: bool,
     is_delegate: bool,
     gas_limit: u64,
-) -> InterpreterResult
-where
-    CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
-{
+) -> InterpreterResult {
     let view = CalldataView::new(ctx, &inputs.input);
     let calldata = view.as_slice();
     let mut gas = Gas::new(gas_limit);
@@ -85,10 +79,7 @@ where
 
 /// Handles withdraw(address) calls - burns tokens and sends L1 message
 /// Emits Withdrawal event on success
-fn withdraw<CTX>(ctx: &mut CTX, inputs: &InputsImpl, mut gas: Gas) -> InterpreterResult
-where
-    CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
-{
+fn withdraw<CTX: ContextTr>(ctx: &mut CTX, inputs: &InputsImpl, mut gas: Gas) -> InterpreterResult {
     let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
 
     let view = CalldataView::new(ctx, &inputs.input);
@@ -175,10 +166,11 @@ where
 
 /// Handles withdrawWithMessage(address,bytes) calls - burns tokens and sends L1 message with additional data
 /// Emits WithdrawalWithMessage event on success
-fn withdraw_with_message<CTX>(ctx: &mut CTX, inputs: &InputsImpl, mut gas: Gas) -> InterpreterResult
-where
-    CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
-{
+fn withdraw_with_message<CTX: ContextTr>(
+    ctx: &mut CTX,
+    inputs: &InputsImpl,
+    mut gas: Gas,
+) -> InterpreterResult {
     let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
 
     let view = CalldataView::new(ctx, &inputs.input);

@@ -1,7 +1,7 @@
 use revm::interpreter::gas::{KECCAK256, KECCAK256WORD, LOG, LOGDATA, LOGTOPIC};
 use std::ops::Mul;
 
-use crate::precompiles::l1_messenger::L2_TO_L1_LOG_SERIALIZE_SIZE;
+use crate::precompiles::v2::l1_messenger::L2_TO_L1_LOG_SERIALIZE_SIZE;
 
 pub const HOOK_BASE_GAS_COST: u64 = 100;
 

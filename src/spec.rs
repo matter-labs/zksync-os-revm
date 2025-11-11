@@ -19,21 +19,38 @@ use revm::primitives::hardfork::{SpecId, UnknownHardfork};
 )]
 #[allow(non_camel_case_types)]
 pub enum ZkSpecId {
+    AtlasV1,
     #[default]
-    Atlas,
+    AtlasV2,
 }
 
 impl ZkSpecId {
     /// Converts the [`ZkSpecId`] into a [`SpecId`].
     pub const fn into_eth_spec(self) -> SpecId {
         match self {
-            Self::Atlas => SpecId::CANCUN,
+            Self::AtlasV1 => SpecId::CANCUN,
+            Self::AtlasV2 => SpecId::CANCUN,
+        }
+    }
+
+    /// Inclusive bounds of supported ZKsync OS Server execution *versions* for this spec.
+    /// If a single version is supported, `min == max`.
+    pub const fn supported_exec_version_bounds(self) -> (u64, u64) {
+        match self {
+            ZkSpecId::AtlasV1 => (1, 3),
+            ZkSpecId::AtlasV2 => (4, 4),
         }
     }
 
     /// Checks if the [`ZkSpecId`] is enabled in the other [`ZkSpecId`].
     pub const fn is_enabled_in(self, other: ZkSpecId) -> bool {
         other as u8 <= self as u8
+    }
+
+    /// Fast const check for a specific version.
+    pub const fn supports_exec_version(self, v: u64) -> bool {
+        let (min, max) = self.supported_exec_version_bounds();
+        v >= min && v <= max
     }
 }
 
@@ -48,7 +65,8 @@ impl FromStr for ZkSpecId {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            name::ATLAS => Ok(ZkSpecId::Atlas),
+            name::ATLASV1 => Ok(ZkSpecId::AtlasV1),
+            name::ATLASV2 => Ok(ZkSpecId::AtlasV2),
             _ => Err(UnknownHardfork),
         }
     }
@@ -57,7 +75,8 @@ impl FromStr for ZkSpecId {
 impl From<ZkSpecId> for &'static str {
     fn from(spec_id: ZkSpecId) -> Self {
         match spec_id {
-            ZkSpecId::Atlas => name::ATLAS,
+            ZkSpecId::AtlasV1 => name::ATLASV1,
+            ZkSpecId::AtlasV2 => name::ATLASV2,
         }
     }
 }
@@ -65,5 +84,6 @@ impl From<ZkSpecId> for &'static str {
 /// String identifiers for ZKsync OS hardforks
 pub mod name {
     /// Initial spec name.
-    pub const ATLAS: &str = "Atlas";
+    pub const ATLASV1: &str = "AtlasV1";
+    pub const ATLASV2: &str = "AtlasV2";
 }

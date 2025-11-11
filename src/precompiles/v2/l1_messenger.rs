@@ -1,17 +1,14 @@
 use std::vec::Vec;
 
 use revm::{
-    context::{Cfg, JournalTr},
+    context::JournalTr,
     context_interface::ContextTr,
     interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
     primitives::{Address, B256, Bytes, Log, LogData, U256, address, keccak256},
 };
 
+use crate::precompiles::v2::gas_cost::{HOOK_BASE_GAS_COST, l1_message_gas_cost, log_gas_cost};
 use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
-use crate::{
-    ZkSpecId,
-    precompiles::gas_cost::{HOOK_BASE_GAS_COST, l1_message_gas_cost, log_gas_cost},
-};
 
 // sendToL1(bytes) - 62f84b24
 pub const SEND_TO_L1_SELECTOR: &[u8] = &[0x62, 0xf8, 0x4b, 0x24];
@@ -25,15 +22,12 @@ pub const L1_MESSENGER_ADDRESS: Address = address!("0000000000000000000000000000
 
 pub const L2_TO_L1_LOG_SERIALIZE_SIZE: usize = 88;
 
-pub(crate) fn send_to_l1_inner<CTX>(
+pub(crate) fn send_to_l1_inner<CTX: ContextTr>(
     ctx: &mut CTX,
     gas: &mut Gas,
     abi_encoded_message: Vec<u8>,
     caller: Address,
-) -> Result<B256, InterpreterResult>
-where
-    CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
-{
+) -> Result<B256, InterpreterResult> {
     let revert = |g: Gas| {
         Err(InterpreterResult::new(
             InstructionResult::Revert,
@@ -123,16 +117,13 @@ where
 }
 
 /// Run the L1 messenger precompile.
-pub fn l1_messenger_precompile_call<CTX>(
+pub fn l1_messenger_precompile_call<CTX: ContextTr>(
     ctx: &mut CTX,
     inputs: &InputsImpl,
     is_static: bool,
     is_delegate: bool,
     gas_limit: u64,
-) -> InterpreterResult
-where
-    CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
-{
+) -> InterpreterResult {
     let view = CalldataView::new(ctx, &inputs.input);
     let calldata = view.as_slice();
     let caller = inputs.caller_address;

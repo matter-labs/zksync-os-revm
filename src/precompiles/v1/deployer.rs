@@ -1,17 +1,13 @@
 use revm::{
     Database,
-    context::{Cfg, JournalTr},
+    context::JournalTr,
     context_interface::ContextTr,
-    interpreter::{
-        Gas, InputsImpl, InstructionResult, InterpreterResult,
-        gas::{COLD_ACCOUNT_ACCESS_COST, WARM_STORAGE_READ_COST},
-    },
+    interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
     primitives::{Address, B256, Bytes, U256, address},
     state::Bytecode,
 };
 
-use crate::precompiles::{calldata_view::CalldataView, gas_cost::set_bytecode_details_extra_gas};
-use crate::{ZkSpecId, precompiles::gas_cost::HOOK_BASE_GAS_COST};
+use crate::precompiles::calldata_view::CalldataView;
 
 // setBytecodeDetailsEVM(address,bytes32,uint32,bytes32) - f6eca0b0
 pub const SET_EVM_BYTECODE_DETAILS: &[u8] = &[0xf6, 0xec, 0xa0, 0xb0];
@@ -32,7 +28,7 @@ pub fn deployer_precompile_call<CTX>(
     gas_limit: u64,
 ) -> InterpreterResult
 where
-    CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
+    CTX: ContextTr,
 {
     let view = CalldataView::new(ctx, &inputs.input);
     let mut calldata = view.as_slice();
@@ -47,8 +43,11 @@ where
         return revert(gas);
     }
 
-    // Charge base cost for calling system hook
-    if !gas.record_cost(HOOK_BASE_GAS_COST) {
+    // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
+    // Also, in the current version of ZKsync OS, this precompile charges 10 ergs,
+    // which is a fraction of gas. Here we charge exactly 1 gas for simplicity,
+    // as it will be fixed with proper gas charging.
+    if !gas.record_cost(1) {
         return oog_error();
     }
 
@@ -104,12 +103,6 @@ where
             // finished reading calldata, release borrow before mutating context
             drop(view);
 
-            // Charge extra gas for `set_bytecode_details`
-            let extra_gas = set_bytecode_details_extra_gas(bytecode_length as u64);
-            if !gas.record_cost(extra_gas) {
-                return oog_error();
-            }
-
             let bytecode = ctx.db_mut().code_by_hash(bytecode_hash).expect(
                 "The bytecode is expected to be pre-loaded for any deployer precompile call",
             );
@@ -117,20 +110,6 @@ where
             let bytecode_padded = Bytecode::new_legacy(Bytes::copy_from_slice(
                 &bytecode.original_bytes()[0..bytecode_length as usize],
             ));
-            let account = ctx
-                .journal_mut()
-                .load_account(address)
-                .expect("load account");
-            let gas_for_access = if account.is_cold {
-                COLD_ACCOUNT_ACCESS_COST
-            } else {
-                WARM_STORAGE_READ_COST
-            };
-            // Charge base cost for warm/cold read
-            if !gas.record_cost(gas_for_access) {
-                return oog_error();
-            }
-
             ctx.journal_mut().touch_account(address);
             ctx.journal_mut()
                 .warm_account(address)

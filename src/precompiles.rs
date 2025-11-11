@@ -8,34 +8,42 @@ use revm::{
     precompile::{Precompiles, bn254, hash, identity, modexp, secp256k1},
     primitives::{Address, OnceLock},
 };
-use std::boxed::Box;
 use std::string::String;
+use std::{boxed::Box, collections::HashMap};
 pub mod calldata_view;
-pub mod deployer;
-pub(crate) mod gas_cost;
-pub mod l1_messenger;
-pub mod l2_base_token;
 pub(crate) mod utils;
+pub mod v1;
+pub mod v2;
 
-use deployer::{CONTRACT_DEPLOYER_ADDRESS, deployer_precompile_call};
-use l1_messenger::{L1_MESSENGER_ADDRESS, l1_messenger_precompile_call};
-use l2_base_token::{L2_BASE_TOKEN_ADDRESS, l2_base_token_precompile_call};
+use v1::deployer::CONTRACT_DEPLOYER_ADDRESS;
+use v1::l1_messenger::L1_MESSENGER_ADDRESS;
+use v1::l2_base_token::L2_BASE_TOKEN_ADDRESS;
+
+type CustomPrecompile<CTX> = fn(
+    ctx: &mut CTX,
+    inputs: &InputsImpl,
+    is_static: bool,
+    is_delegate: bool,
+    gas_limit: u64,
+) -> InterpreterResult;
 
 /// ZKsync OS precompile provider
 #[derive(Debug, Clone)]
-pub struct ZKsyncPrecompiles {
+pub struct ZKsyncPrecompiles<CTX: ContextTr> {
     /// Inner precompile provider is same as Ethereums.
     inner: EthPrecompiles,
+    // Custom precompiles specific to ZKsync OS.
+    custom_precompiles: HashMap<Address, CustomPrecompile<CTX>>,
     /// Spec id of the precompile provider.
     spec: ZkSpecId,
 }
 
-impl ZKsyncPrecompiles {
+impl<CTX: ContextTr> ZKsyncPrecompiles<CTX> {
     /// Create a new precompile provider with the given ZkSpec.
     #[inline]
     pub fn new_with_spec(spec: ZkSpecId) -> Self {
         let precompiles = match spec {
-            ZkSpecId::Atlas => {
+            ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => {
                 static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
                 INSTANCE.get_or_init(|| {
                     let mut precompiles = Precompiles::default();
@@ -55,11 +63,47 @@ impl ZKsyncPrecompiles {
                 })
             }
         };
+
+        let custom_precompiles = match spec {
+            ZkSpecId::AtlasV1 => [
+                (
+                    CONTRACT_DEPLOYER_ADDRESS,
+                    v1::deployer::deployer_precompile_call::<CTX> as CustomPrecompile<CTX>,
+                ),
+                (
+                    L1_MESSENGER_ADDRESS,
+                    v1::l1_messenger::l1_messenger_precompile_call::<CTX> as CustomPrecompile<CTX>,
+                ),
+                (
+                    L2_BASE_TOKEN_ADDRESS,
+                    v1::l2_base_token::l2_base_token_precompile_call::<CTX>
+                        as CustomPrecompile<CTX>,
+                ),
+            ]
+            .into(),
+            ZkSpecId::AtlasV2 => [
+                (
+                    CONTRACT_DEPLOYER_ADDRESS,
+                    v2::deployer::deployer_precompile_call::<CTX> as CustomPrecompile<CTX>,
+                ),
+                (
+                    L1_MESSENGER_ADDRESS,
+                    v2::l1_messenger::l1_messenger_precompile_call::<CTX> as CustomPrecompile<CTX>,
+                ),
+                (
+                    L2_BASE_TOKEN_ADDRESS,
+                    v2::l2_base_token::l2_base_token_precompile_call::<CTX>
+                        as CustomPrecompile<CTX>,
+                ),
+            ]
+            .into(),
+        };
         Self {
             inner: EthPrecompiles {
                 precompiles,
                 spec: spec.into_eth_spec(),
             },
+            custom_precompiles,
             spec,
         }
     }
@@ -71,7 +115,7 @@ impl ZKsyncPrecompiles {
     }
 }
 
-impl<CTX> PrecompileProvider<CTX> for ZKsyncPrecompiles
+impl<CTX> PrecompileProvider<CTX> for ZKsyncPrecompiles<CTX>
 where
     CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
 {
@@ -95,19 +139,12 @@ where
         is_static: bool,
         gas_limit: u64,
     ) -> Result<Option<Self::Output>, String> {
-        // If the code is loaded from different account it is a delegatecall
-        let delegate =
-            matches!(inputs.bytecode_address, Some(addr) if addr != inputs.target_address);
-        if *address == CONTRACT_DEPLOYER_ADDRESS {
-            return Ok(Some(deployer_precompile_call(
-                context, inputs, is_static, delegate, gas_limit,
-            )));
-        } else if *address == L1_MESSENGER_ADDRESS {
-            return Ok(Some(l1_messenger_precompile_call(
-                context, inputs, is_static, delegate, gas_limit,
-            )));
-        } else if *address == L2_BASE_TOKEN_ADDRESS {
-            return Ok(Some(l2_base_token_precompile_call(
+        if let Some(precompile_call) = self.custom_precompiles.get(address) {
+            // If the code is loaded from different account it is a delegatecall
+            let delegate =
+                matches!(inputs.bytecode_address, Some(addr) if addr != inputs.target_address);
+
+            return Ok(Some(precompile_call(
                 context, inputs, is_static, delegate, gas_limit,
             )));
         }
@@ -127,8 +164,8 @@ where
     }
 }
 
-impl Default for ZKsyncPrecompiles {
+impl<CTX: ContextTr> Default for ZKsyncPrecompiles<CTX> {
     fn default() -> Self {
-        Self::new_with_spec(ZkSpecId::Atlas)
+        Self::new_with_spec(ZkSpecId::AtlasV2)
     }
 }
