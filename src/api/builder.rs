@@ -2,7 +2,7 @@
 use crate::{ZkSpecId, evm::ZKsyncEvm, precompiles::ZKsyncPrecompiles, transaction::ZkTxTr};
 use revm::{
     Context, Database,
-    context::Cfg,
+    context::{Cfg, ContextTr},
     context_interface::{Block, JournalTr},
     handler::instructions::EthInstructions,
     interpreter::interpreter::EthInterpreter,
@@ -11,12 +11,12 @@ use revm::{
 
 /// Type alias for default ZKsyncEvm
 pub type DefaultZKsyncEvm<CTX, INSP = ()> =
-    ZKsyncEvm<CTX, INSP, EthInstructions<EthInterpreter, CTX>, ZKsyncPrecompiles>;
+    ZKsyncEvm<CTX, INSP, EthInstructions<EthInterpreter, CTX>, ZKsyncPrecompiles<CTX>>;
 
 /// Trait that allows for ZKsyncEvm to be built.
 pub trait ZkBuilder: Sized {
     /// Type of the context.
-    type Context;
+    type Context: ContextTr;
 
     /// Build the ZKsync OS EVM.
     fn build_zk(self) -> DefaultZKsyncEvm<Self::Context>;

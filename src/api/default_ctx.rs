@@ -19,7 +19,7 @@ impl DefaultZk for ZkContext<EmptyDB> {
     fn default() -> Self {
         Context::mainnet()
             .with_tx(ZKsyncTx::builder().build_fill())
-            .with_cfg(CfgEnv::new_with_spec(ZkSpecId::Atlas))
+            .with_cfg(CfgEnv::new_with_spec(ZkSpecId::AtlasV2))
     }
 }
 

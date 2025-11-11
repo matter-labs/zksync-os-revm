@@ -1,13 +1,12 @@
 use revm::{
     Database,
-    context::{Cfg, JournalTr},
+    context::JournalTr,
     context_interface::ContextTr,
     interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
     primitives::{Address, B256, Bytes, U256, address},
     state::Bytecode,
 };
 
-use crate::ZkSpecId;
 use crate::precompiles::calldata_view::CalldataView;
 
 // setBytecodeDetailsEVM(address,bytes32,uint32,bytes32) - f6eca0b0
@@ -29,7 +28,7 @@ pub fn deployer_precompile_call<CTX>(
     gas_limit: u64,
 ) -> InterpreterResult
 where
-    CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
+    CTX: ContextTr,
 {
     let view = CalldataView::new(ctx, &inputs.input);
     let mut calldata = view.as_slice();

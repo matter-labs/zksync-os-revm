@@ -1,14 +1,14 @@
 use std::vec::Vec;
 
 use revm::{
-    context::{Cfg, JournalTr},
+    context::JournalTr,
     context_interface::ContextTr,
     interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
     primitives::{Address, B256, Bytes, Log, LogData, U256, address, keccak256},
 };
 
-use crate::ZkSpecId;
-use crate::precompiles::calldata_view::CalldataView;
+use crate::precompiles::v2::gas_cost::{HOOK_BASE_GAS_COST, l1_message_gas_cost, log_gas_cost};
+use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
 
 // sendToL1(bytes) - 62f84b24
 pub const SEND_TO_L1_SELECTOR: &[u8] = &[0x62, 0xf8, 0x4b, 0x24];
@@ -20,23 +20,21 @@ const L1_MESSAGE_SENT_TOPIC: [u8; 32] = [
 
 pub const L1_MESSENGER_ADDRESS: Address = address!("0000000000000000000000000000000000008008");
 
-#[inline(always)]
-fn b160_to_b256(addr: Address) -> B256 {
-    let mut out = [0u8; 32];
-    out[12..].copy_from_slice(addr.as_slice()); // pad left, store address in low 20 bytes
-    B256::from(out)
-}
+pub const L2_TO_L1_LOG_SERIALIZE_SIZE: usize = 88;
 
-pub(crate) fn send_to_l1_inner<CTX>(
+pub(crate) fn send_to_l1_inner<CTX: ContextTr>(
     ctx: &mut CTX,
     gas: &mut Gas,
     abi_encoded_message: Vec<u8>,
     caller: Address,
-) -> InterpreterResult
-where
-    CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
-{
-    let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
+) -> Result<B256, InterpreterResult> {
+    let revert = |g: Gas| {
+        Err(InterpreterResult::new(
+            InstructionResult::Revert,
+            [].into(),
+            g,
+        ))
+    };
     let data = abi_encoded_message.as_slice();
 
     let abi_encoded_message_len: u32 = match data.len().try_into() {
@@ -87,17 +85,17 @@ where
     }
     let message = &data[(length_encoding_end as usize)..message_end as usize];
 
-    // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
-    // let words = (message.len() as u64).div_ceil(32);
-    // let keccak256_gas = KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(words));
-    // let log_gas = LOG
-    //     .saturating_add(LOGTOPIC.saturating_mul(3))
-    //     .saturating_add(LOGDATA.saturating_mul(message.len() as u64));
-    // let needed_gas = keccak256_gas + log_gas;
-    // if !gas.record_cost(needed_gas) {
-    //     // Out-of-gas error
-    //     return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
-    // }
+    // Charge gas for emitting l1 message and log
+    let gas_cost =
+        l1_message_gas_cost(message.len()) + log_gas_cost(3, abi_encoded_message_len as u64);
+    if !gas.record_cost(gas_cost) {
+        // Out-of-gas error
+        return Err(InterpreterResult::new(
+            InstructionResult::OutOfGas,
+            [].into(),
+            Gas::new(0),
+        ));
+    }
 
     let message_hash = keccak256(message);
     let log = Log {
@@ -115,20 +113,17 @@ where
 
     // TODO: save L2 -> L1 message in a context of block
 
-    InterpreterResult::new(InstructionResult::Return, message_hash.into(), *gas)
+    Ok(message_hash)
 }
 
 /// Run the L1 messenger precompile.
-pub fn l1_messenger_precompile_call<CTX>(
+pub fn l1_messenger_precompile_call<CTX: ContextTr>(
     ctx: &mut CTX,
     inputs: &InputsImpl,
     is_static: bool,
     is_delegate: bool,
     gas_limit: u64,
-) -> InterpreterResult
-where
-    CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
-{
+) -> InterpreterResult {
     let view = CalldataView::new(ctx, &inputs.input);
     let calldata = view.as_slice();
     let caller = inputs.caller_address;
@@ -140,11 +135,8 @@ where
         return revert(gas);
     }
 
-    // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
-    // Also, in the current version of ZKsync OS, this precompile charges 10 ergs,
-    // which is a fraction of gas. Here we charge exactly 1 gas for simplicity,
-    // as it will be fixed with proper gas charging.
-    if !gas.record_cost(1) {
+    // Charge base cost for calling system hook
+    if !gas.record_cost(HOOK_BASE_GAS_COST) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }
@@ -163,7 +155,12 @@ where
         s if s == SEND_TO_L1_SELECTOR => {
             let call_payload = Vec::from(&calldata[4..]);
             drop(view);
-            send_to_l1_inner(ctx, &mut gas, call_payload, caller)
+            match send_to_l1_inner(ctx, &mut gas, call_payload, caller) {
+                Ok(message_hash) => {
+                    InterpreterResult::new(InstructionResult::Return, message_hash.into(), gas)
+                }
+                Err(interpreter_result) => interpreter_result,
+            }
         }
         _ => revert(gas),
     }

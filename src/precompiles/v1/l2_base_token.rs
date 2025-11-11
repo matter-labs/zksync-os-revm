@@ -1,13 +1,12 @@
 use std::vec::Vec;
 
 use revm::{
-    context::{Cfg, ContextTr, JournalTr},
+    context::{ContextTr, JournalTr},
     interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
     primitives::{Address, U256, address},
 };
 
 use super::l1_messenger::send_to_l1_inner;
-use crate::ZkSpecId;
 use crate::precompiles::calldata_view::CalldataView;
 
 pub const L2_BASE_TOKEN_ADDRESS: Address = address!("000000000000000000000000000000000000800a");
@@ -22,16 +21,13 @@ pub const WITHDRAW_WITH_MESSAGE_SELECTOR: &[u8] = &[0x84, 0xbc, 0x3e, 0xb0];
 pub const FINALIZE_ETH_WITHDRAWAL_SELECTOR: &[u8] = &[0x6c, 0x09, 0x60, 0xf9];
 
 /// Run the L2 base token precompile.
-pub fn l2_base_token_precompile_call<CTX>(
+pub fn l2_base_token_precompile_call<CTX: ContextTr>(
     ctx: &mut CTX,
     inputs: &InputsImpl,
     is_static: bool,
     is_delegate: bool,
     gas_limit: u64,
-) -> InterpreterResult
-where
-    CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
-{
+) -> InterpreterResult {
     let view = CalldataView::new(ctx, &inputs.input);
     let calldata = view.as_slice();
     let caller = inputs.caller_address;
