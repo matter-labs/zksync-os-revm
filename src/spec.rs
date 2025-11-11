@@ -33,24 +33,18 @@ impl ZkSpecId {
         }
     }
 
-    /// Inclusive bounds of supported ZKsync OS Server execution *versions* for this spec.
-    /// If a single version is supported, `min == max`.
-    pub const fn supported_exec_version_bounds(self) -> (u64, u64) {
-        match self {
-            ZkSpecId::AtlasV1 => (1, 3),
-            ZkSpecId::AtlasV2 => (4, 4),
+    /// Map a ZKsync OS execution version back to the spec (if any).
+    pub const fn from_exec_version(v: u32) -> Option<Self> {
+        match v {
+            1..=3 => Some(Self::AtlasV1),
+            4 => Some(Self::AtlasV2),
+            _ => None,
         }
     }
 
     /// Checks if the [`ZkSpecId`] is enabled in the other [`ZkSpecId`].
     pub const fn is_enabled_in(self, other: ZkSpecId) -> bool {
         other as u8 <= self as u8
-    }
-
-    /// Fast const check for a specific version.
-    pub const fn supports_exec_version(self, v: u64) -> bool {
-        let (min, max) = self.supported_exec_version_bounds();
-        v >= min && v <= max
     }
 }
 
