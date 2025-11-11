@@ -30,11 +30,17 @@ pub(crate) fn send_to_l1_inner<CTX>(
     gas: &mut Gas,
     abi_encoded_message: Vec<u8>,
     caller: Address,
-) -> InterpreterResult
+) -> Result<B256, InterpreterResult>
 where
     CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
 {
-    let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
+    let revert = |g: Gas| {
+        Err(InterpreterResult::new(
+            InstructionResult::Revert,
+            [].into(),
+            g,
+        ))
+    };
     let data = abi_encoded_message.as_slice();
 
     let abi_encoded_message_len: u32 = match data.len().try_into() {
@@ -90,7 +96,11 @@ where
         l1_message_gas_cost(message.len()) + log_gas_cost(3, abi_encoded_message_len as u64);
     if !gas.record_cost(gas_cost) {
         // Out-of-gas error
-        return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
+        return Err(InterpreterResult::new(
+            InstructionResult::OutOfGas,
+            [].into(),
+            Gas::new(0),
+        ));
     }
 
     let message_hash = keccak256(message);
@@ -109,7 +119,7 @@ where
 
     // TODO: save L2 -> L1 message in a context of block
 
-    InterpreterResult::new(InstructionResult::Return, message_hash.into(), *gas)
+    Ok(message_hash)
 }
 
 /// Run the L1 messenger precompile.
@@ -154,7 +164,12 @@ where
         s if s == SEND_TO_L1_SELECTOR => {
             let call_payload = Vec::from(&calldata[4..]);
             drop(view);
-            send_to_l1_inner(ctx, &mut gas, call_payload, caller)
+            match send_to_l1_inner(ctx, &mut gas, call_payload, caller) {
+                Ok(message_hash) => {
+                    InterpreterResult::new(InstructionResult::Return, message_hash.into(), gas)
+                }
+                Err(interpreter_result) => interpreter_result,
+            }
         }
         _ => revert(gas),
     }

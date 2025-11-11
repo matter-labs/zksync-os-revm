@@ -141,12 +141,15 @@ where
     ctx.journal_mut()
         .caller_accounting_journal_entry(L2_BASE_TOKEN_ADDRESS, balance_before, false);
 
-    let result = send_to_l1_inner(
+    let message_hash = match send_to_l1_inner(
         ctx,
         &mut gas,
         Vec::from(l1_messenger_calldata),
         L2_BASE_TOKEN_ADDRESS,
-    );
+    ) {
+        Ok(message_hash) => message_hash,
+        Err(interpreter_result) => return interpreter_result,
+    };
 
     let log = Log {
         address: L2_BASE_TOKEN_ADDRESS,
@@ -168,7 +171,7 @@ where
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }
 
-    result
+    InterpreterResult::new(InstructionResult::Return, message_hash.into(), gas)
 }
 
 /// Handles withdrawWithMessage(address,bytes) calls - burns tokens and sends L1 message with additional data
@@ -281,7 +284,10 @@ where
     *from_balance = from_balance_decr;
     ctx.journal_mut()
         .caller_accounting_journal_entry(L2_BASE_TOKEN_ADDRESS, balance_before, false);
-    let result = send_to_l1_inner(ctx, &mut gas, message, L2_BASE_TOKEN_ADDRESS);
+    let message_hash = match send_to_l1_inner(ctx, &mut gas, message, L2_BASE_TOKEN_ADDRESS) {
+        Ok(message_hash) => message_hash,
+        Err(interpreter_result) => return interpreter_result,
+    };
 
     /*
         event WithdrawalWithMessage(
@@ -332,5 +338,5 @@ where
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }
 
-    result
+    InterpreterResult::new(InstructionResult::Return, message_hash.into(), gas)
 }
