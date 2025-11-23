@@ -5,7 +5,7 @@ use revm::{
     context_interface::ContextTr,
     handler::{EthPrecompiles, PrecompileProvider},
     interpreter::{InputsImpl, InterpreterResult},
-    precompile::{Precompiles, bn254, hash, identity, modexp, secp256k1},
+    precompile::{Precompiles, bn254, hash, identity, modexp, secp256k1, secp256r1},
     primitives::{Address, OnceLock},
 };
 use std::string::String;
@@ -58,6 +58,7 @@ impl<CTX: ContextTr> ZKsyncPrecompiles<CTX> {
                         bn254::add::ISTANBUL,
                         bn254::mul::ISTANBUL,
                         bn254::pair::ISTANBUL,
+                        secp256r1::P256VERIFY
                     ]);
                     precompiles
                 })

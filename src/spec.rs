@@ -37,7 +37,7 @@ impl ZkSpecId {
     pub const fn from_exec_version(v: u32) -> Option<Self> {
         match v {
             1..=3 => Some(Self::AtlasV1),
-            4 => Some(Self::AtlasV2),
+            4..=5 => Some(Self::AtlasV2),
             _ => None,
         }
     }
