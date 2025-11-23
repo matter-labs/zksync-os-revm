@@ -48,7 +48,8 @@ impl<CTX: ContextTr> ZKsyncPrecompiles<CTX> {
                 INSTANCE.get_or_init(|| {
                     let mut precompiles = Precompiles::default();
                     // Generating the list instead of using default Cancun fork,
-                    // because we need to remove Blake2 and Point Evaluation
+                    // because we need to remove Blake2 and Point Evaluation and
+                    // add P256 precompile.
                     precompiles.extend([
                         secp256k1::ECRECOVER,
                         hash::SHA256,
@@ -58,7 +59,7 @@ impl<CTX: ContextTr> ZKsyncPrecompiles<CTX> {
                         bn254::add::ISTANBUL,
                         bn254::mul::ISTANBUL,
                         bn254::pair::ISTANBUL,
-                        secp256r1::P256VERIFY
+                        secp256r1::P256VERIFY,
                     ]);
                     precompiles
                 })

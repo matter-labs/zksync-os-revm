@@ -28,17 +28,7 @@ impl ZkSpecId {
     /// Converts the [`ZkSpecId`] into a [`SpecId`].
     pub const fn into_eth_spec(self) -> SpecId {
         match self {
-            Self::AtlasV1 => SpecId::CANCUN,
-            Self::AtlasV2 => SpecId::CANCUN,
-        }
-    }
-
-    /// Map a ZKsync OS execution version back to the spec (if any).
-    pub const fn from_exec_version(v: u32) -> Option<Self> {
-        match v {
-            1..=3 => Some(Self::AtlasV1),
-            4..=5 => Some(Self::AtlasV2),
-            _ => None,
+            Self::AtlasV1 | Self::AtlasV2 => SpecId::CANCUN,
         }
     }
 
