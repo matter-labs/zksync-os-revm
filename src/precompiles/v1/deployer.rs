@@ -2,11 +2,11 @@ use revm::{
     Database,
     context::JournalTr,
     context_interface::ContextTr,
-    interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
+    interpreter::{Gas, InstructionResult, InterpreterResult},
     primitives::{Address, B256, Bytes, U256, address},
     state::Bytecode,
 };
-
+use revm::interpreter::CallInputs;
 use crate::precompiles::calldata_view::CalldataView;
 
 // setBytecodeDetailsEVM(address,bytes32,uint32,bytes32) - f6eca0b0
@@ -22,19 +22,17 @@ pub const MAX_CODE_SIZE: usize = 0x6000;
 /// Run the deployer precompile.
 pub fn deployer_precompile_call<CTX>(
     ctx: &mut CTX,
-    inputs: &InputsImpl,
-    is_static: bool,
+    inputs: &CallInputs,
     is_delegate: bool,
-    gas_limit: u64,
 ) -> InterpreterResult
 where
     CTX: ContextTr,
 {
     let view = CalldataView::new(ctx, &inputs.input);
     let mut calldata = view.as_slice();
-    let caller = inputs.caller_address;
-    let call_value = inputs.call_value;
-    let mut gas = Gas::new(gas_limit);
+    let caller = inputs.caller;
+    let call_value = inputs.value.get();
+    let mut gas = Gas::new(inputs.gas_limit);
     let oog_error = || InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
 
@@ -59,7 +57,7 @@ where
     selector.copy_from_slice(&calldata[..4]);
     match selector {
         s if s == SET_EVM_BYTECODE_DETAILS => {
-            if is_static {
+            if inputs.is_static {
                 return revert(gas);
             }
 
@@ -111,9 +109,10 @@ where
                 &bytecode.original_bytes()[0..bytecode_length as usize],
             ));
             ctx.journal_mut().touch_account(address);
-            ctx.journal_mut()
-                .warm_account(address)
-                .expect("warm account");
+            // todo: replace below with `ctx.journal_mut().warm_access_list(list)`?
+            // ctx.journal_mut()
+            //     .warm_account(address)
+            //     .expect("warm account");
             ctx.journal_mut().set_code(address, bytecode_padded);
             InterpreterResult::new(InstructionResult::Return, [].into(), gas)
         }

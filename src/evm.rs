@@ -67,6 +67,14 @@ where
 {
     type Inspector = INSP;
 
+    fn all_inspector(&self) -> (&Self::Context, &Self::Instructions, &Self::Precompiles, &FrameStack<Self::Frame>, &Self::Inspector) {
+        self.0.all_inspector()
+    }
+
+    fn all_mut_inspector(&mut self) -> (&mut Self::Context, &mut Self::Instructions, &mut Self::Precompiles, &mut FrameStack<Self::Frame>, &mut Self::Inspector) {
+        self.0.all_mut_inspector()
+    }
+
     fn inspector(&mut self) -> &mut Self::Inspector {
         &mut self.0.inspector
     }
@@ -112,6 +120,14 @@ where
     type Instructions = I;
     type Precompiles = P;
     type Frame = EthFrame<EthInterpreter>;
+
+    fn all(&self) -> (&Self::Context, &Self::Instructions, &Self::Precompiles, &FrameStack<Self::Frame>) {
+        self.0.all()
+    }
+
+    fn all_mut(&mut self) -> (&mut Self::Context, &mut Self::Instructions, &mut Self::Precompiles, &mut FrameStack<Self::Frame>) {
+        self.0.all_mut()
+    }
 
     fn ctx(&mut self) -> &mut Self::Context {
         &mut self.0.ctx

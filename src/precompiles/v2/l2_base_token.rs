@@ -3,11 +3,11 @@ use std::vec::Vec;
 use revm::{
     context::{ContextTr, JournalTr},
     interpreter::{
-        Gas, InputsImpl, InstructionResult, InterpreterResult, gas::WARM_STORAGE_READ_COST,
+        Gas, InstructionResult, InterpreterResult, gas::WARM_STORAGE_READ_COST,
     },
     primitives::{Address, B256, Bytes, Log, LogData, U256, address},
 };
-
+use revm::interpreter::CallInputs;
 use super::l1_messenger::send_to_l1_inner;
 use crate::precompiles::v2::gas_cost::{HOOK_BASE_GAS_COST, log_gas_cost};
 use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
@@ -38,14 +38,12 @@ const WITHDRAWAL_WITH_MESSAGE_TOPIC: [u8; 32] = [
 /// Run the L2 base token precompile.
 pub fn l2_base_token_precompile_call<CTX: ContextTr>(
     ctx: &mut CTX,
-    inputs: &InputsImpl,
-    is_static: bool,
+    inputs: &CallInputs,
     is_delegate: bool,
-    gas_limit: u64,
 ) -> InterpreterResult {
     let view = CalldataView::new(ctx, &inputs.input);
     let calldata = view.as_slice();
-    let mut gas = Gas::new(gas_limit);
+    let mut gas = Gas::new(inputs.gas_limit);
     let oog_error = || InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
     // Mirror the same behaviour as on ZKsync OS
@@ -59,7 +57,7 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
     }
 
     // Check after charging the gas
-    if is_static {
+    if inputs.is_static {
         return revert(gas);
     }
 
@@ -79,7 +77,7 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
 
 /// Handles withdraw(address) calls - burns tokens and sends L1 message
 /// Emits Withdrawal event on success
-fn withdraw<CTX: ContextTr>(ctx: &mut CTX, inputs: &InputsImpl, mut gas: Gas) -> InterpreterResult {
+fn withdraw<CTX: ContextTr>(ctx: &mut CTX, inputs: &CallInputs, mut gas: Gas) -> InterpreterResult {
     let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
 
     let view = CalldataView::new(ctx, &inputs.input);
@@ -108,7 +106,7 @@ fn withdraw<CTX: ContextTr>(ctx: &mut CTX, inputs: &InputsImpl, mut gas: Gas) ->
     }
     let l1_receiver = calldata[(4 + 12)..36].to_vec();
     l1_messenger_calldata[68..88].copy_from_slice(&l1_receiver);
-    l1_messenger_calldata[88..120].copy_from_slice(&inputs.call_value.to_be_bytes::<32>());
+    l1_messenger_calldata[88..120].copy_from_slice(&inputs.value.get().to_be_bytes::<32>());
 
     drop(view);
 
@@ -121,16 +119,16 @@ fn withdraw<CTX: ContextTr>(ctx: &mut CTX, inputs: &InputsImpl, mut gas: Gas) ->
     ctx.journal_mut().touch_account(L2_BASE_TOKEN_ADDRESS);
     let mut from_account = ctx
         .journal_mut()
-        .load_account(L2_BASE_TOKEN_ADDRESS)
+        .load_account_with_code_mut(L2_BASE_TOKEN_ADDRESS)
         .expect("load account");
-    let from_balance = &mut from_account.info.balance;
-    let balance_before = *from_balance;
-    let Some(from_balance_decr) = from_balance.checked_sub(inputs.call_value) else {
+    let balance_before = from_account.info.balance;
+    let Some(from_balance_decr) = balance_before.checked_sub(inputs.value.get()) else {
         return revert(gas);
     };
-    *from_balance = from_balance_decr;
-    ctx.journal_mut()
-        .caller_accounting_journal_entry(L2_BASE_TOKEN_ADDRESS, balance_before, false);
+    from_account.set_balance(from_balance_decr);
+    // todo: double-check that this is not needed anymore
+    // ctx.journal_mut()
+    //     .caller_accounting_journal_entry(L2_BASE_TOKEN_ADDRESS, balance_before, false);
 
     if let Err(interpreter_result) = send_to_l1_inner(
         ctx,
@@ -146,10 +144,10 @@ fn withdraw<CTX: ContextTr>(ctx: &mut CTX, inputs: &InputsImpl, mut gas: Gas) ->
         data: LogData::new_unchecked(
             vec![
                 B256::from_slice(&WITHDRAWAL_TOPIC),
-                b160_to_b256(inputs.caller_address), // _l2Sender
+                b160_to_b256(inputs.caller), // _l2Sender
                 U256::from_be_slice(&l1_receiver).into(),
             ],
-            inputs.call_value.to_be_bytes::<32>().into(),
+            inputs.value.get().to_be_bytes::<32>().into(),
         ),
     };
     ctx.journal_mut().log(log);
@@ -168,7 +166,7 @@ fn withdraw<CTX: ContextTr>(ctx: &mut CTX, inputs: &InputsImpl, mut gas: Gas) ->
 /// Emits WithdrawalWithMessage event on success
 fn withdraw_with_message<CTX: ContextTr>(
     ctx: &mut CTX,
-    inputs: &InputsImpl,
+    inputs: &CallInputs,
     mut gas: Gas,
 ) -> InterpreterResult {
     let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
@@ -245,8 +243,8 @@ fn withdraw_with_message<CTX: ContextTr>(
     message.extend_from_slice(FINALIZE_ETH_WITHDRAWAL_SELECTOR);
     let l1_receiver = calldata[(4 + 12)..36].to_vec();
     message.extend_from_slice(&l1_receiver);
-    message.extend_from_slice(&inputs.call_value.to_be_bytes::<32>());
-    message.extend_from_slice(inputs.caller_address.as_ref());
+    message.extend_from_slice(&inputs.value.get().to_be_bytes::<32>());
+    message.extend_from_slice(inputs.caller.as_ref());
     message.extend_from_slice(&additional_data);
     // Populating the rest of the message with zeros to make it a multiple of 32 bytes
     message.extend(core::iter::repeat_n(
@@ -265,16 +263,16 @@ fn withdraw_with_message<CTX: ContextTr>(
     ctx.journal_mut().touch_account(L2_BASE_TOKEN_ADDRESS);
     let mut from_account = ctx
         .journal_mut()
-        .load_account(L2_BASE_TOKEN_ADDRESS)
+        .load_account_with_code_mut(L2_BASE_TOKEN_ADDRESS)
         .expect("load account");
-    let from_balance = &mut from_account.info.balance;
-    let balance_before = *from_balance;
-    let Some(from_balance_decr) = from_balance.checked_sub(inputs.call_value) else {
+    let balance_before = from_account.info.balance;
+    let Some(from_balance_decr) = balance_before.checked_sub(inputs.value.get()) else {
         return revert(gas);
     };
-    *from_balance = from_balance_decr;
-    ctx.journal_mut()
-        .caller_accounting_journal_entry(L2_BASE_TOKEN_ADDRESS, balance_before, false);
+    from_account.set_balance(from_balance_decr);
+    // todo: double-check that this is not needed anymore
+    // ctx.journal_mut()
+    //     .caller_accounting_journal_entry(L2_BASE_TOKEN_ADDRESS, balance_before, false);
     if let Err(interpreter_result) = send_to_l1_inner(ctx, &mut gas, message, L2_BASE_TOKEN_ADDRESS)
     {
         return interpreter_result;
@@ -298,7 +296,7 @@ fn withdraw_with_message<CTX: ContextTr>(
     };
 
     let mut event_data = std::vec::Vec::with_capacity(abi_encoded_event_length + 32);
-    event_data.extend_from_slice(&inputs.call_value.to_be_bytes::<32>());
+    event_data.extend_from_slice(&inputs.value.get().to_be_bytes::<32>());
     event_data.extend_from_slice(&[0u8; 64]);
     event_data[63] = 64; // offset
     event_data[64..96].copy_from_slice(&U256::from(additional_data.len()).to_be_bytes::<32>());
@@ -314,7 +312,7 @@ fn withdraw_with_message<CTX: ContextTr>(
         data: LogData::new_unchecked(
             vec![
                 B256::from_slice(&WITHDRAWAL_WITH_MESSAGE_TOPIC),
-                b160_to_b256(inputs.caller_address), // _l2Sender
+                b160_to_b256(inputs.caller), // _l2Sender
                 U256::from_be_slice(&l1_receiver).into(),
             ],
             Bytes::from(event_data),

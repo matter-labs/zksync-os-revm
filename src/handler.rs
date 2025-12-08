@@ -140,12 +140,12 @@ where
 
         let (tx, journal) = ctx.tx_journal_mut();
 
-        let caller_account = journal.load_account_code(tx.caller())?.data;
+        let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
 
         if !is_l1_to_l2_tx {
             // validates account nonce and code
             validate_account_nonce_and_code(
-                &mut caller_account.info,
+                &caller_account.info,
                 tx.nonce(),
                 is_eip3607_disabled,
                 is_nonce_check_disabled,
@@ -153,7 +153,7 @@ where
         }
 
         // old balance is journaled before mint is incremented.
-        let old_balance = caller_account.info.balance;
+        // let old_balance = caller_account.info.balance;
 
         let mut new_balance = caller_account.info.balance.saturating_add(U256::from(mint));
 
@@ -179,17 +179,18 @@ where
         new_balance = new_balance.saturating_sub(gas_balance_spending);
 
         // Touch account so we know it is changed.
-        caller_account.mark_touch();
-        caller_account.info.balance = new_balance;
+        caller_account.touch();
+        caller_account.set_balance(new_balance);
 
         // Bump the nonce for calls. Nonce for CREATE will be bumped in `handle_create`.
         if !is_l1_to_l2_tx && tx.kind().is_call() {
-            caller_account.info.nonce = caller_account.info.nonce.saturating_add(1);
+            caller_account.bump_nonce();
         }
 
         // NOTE: all changes to the caller account should journaled so in case of error
         // we can revert the changes.
-        journal.caller_accounting_journal_entry(tx.caller(), old_balance, tx.kind().is_call());
+        // todo: double-check that this is not needed anymore
+        // journal.caller_accounting_journal_entry(tx.caller(), old_balance, tx.kind().is_call());
 
         Ok(())
     }
@@ -282,11 +283,11 @@ where
         // === forced-fail short-circuit ===
         let mut exec_result = if evm.ctx().tx().force_fail() {
             let (tx, journal) = evm.ctx().tx_journal_mut();
-            let caller_account = journal.load_account_code(tx.caller())?.data;
+            let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
             if tx.kind().is_create() {
                 // Bump the nonce for creates, because usually it is handled in `handle_create`.
                 // And force faillure doesn't call the actual execution.
-                caller_account.info.nonce = caller_account.info.nonce.saturating_add(1);
+                caller_account.bump_nonce();
             }
             // Synthesize a top-level REVERT frame result (no state changes).
             // 1) Make an InterpreterResult with REVERT + returndata.
