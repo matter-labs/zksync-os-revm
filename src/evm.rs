@@ -67,11 +67,27 @@ where
 {
     type Inspector = INSP;
 
-    fn all_inspector(&self) -> (&Self::Context, &Self::Instructions, &Self::Precompiles, &FrameStack<Self::Frame>, &Self::Inspector) {
+    fn all_inspector(
+        &self,
+    ) -> (
+        &Self::Context,
+        &Self::Instructions,
+        &Self::Precompiles,
+        &FrameStack<Self::Frame>,
+        &Self::Inspector,
+    ) {
         self.0.all_inspector()
     }
 
-    fn all_mut_inspector(&mut self) -> (&mut Self::Context, &mut Self::Instructions, &mut Self::Precompiles, &mut FrameStack<Self::Frame>, &mut Self::Inspector) {
+    fn all_mut_inspector(
+        &mut self,
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut FrameStack<Self::Frame>,
+        &mut Self::Inspector,
+    ) {
         self.0.all_mut_inspector()
     }
 
@@ -121,11 +137,25 @@ where
     type Precompiles = P;
     type Frame = EthFrame<EthInterpreter>;
 
-    fn all(&self) -> (&Self::Context, &Self::Instructions, &Self::Precompiles, &FrameStack<Self::Frame>) {
+    fn all(
+        &self,
+    ) -> (
+        &Self::Context,
+        &Self::Instructions,
+        &Self::Precompiles,
+        &FrameStack<Self::Frame>,
+    ) {
         self.0.all()
     }
 
-    fn all_mut(&mut self) -> (&mut Self::Context, &mut Self::Instructions, &mut Self::Precompiles, &mut FrameStack<Self::Frame>) {
+    fn all_mut(
+        &mut self,
+    ) -> (
+        &mut Self::Context,
+        &mut Self::Instructions,
+        &mut Self::Precompiles,
+        &mut FrameStack<Self::Frame>,
+    ) {
         self.0.all_mut()
     }
 

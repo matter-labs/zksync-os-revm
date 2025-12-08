@@ -1,16 +1,16 @@
 //! Contains ZKsync OS specific precompiles.
 use crate::ZkSpecId;
+use revm::interpreter::CallInputs;
 use revm::{
     context::Cfg,
     context_interface::ContextTr,
     handler::{EthPrecompiles, PrecompileProvider},
-    interpreter::{InterpreterResult},
+    interpreter::InterpreterResult,
     precompile::{Precompiles, bn254, hash, identity, modexp, secp256k1, secp256r1},
     primitives::{Address, OnceLock},
 };
 use std::string::String;
 use std::{boxed::Box, collections::HashMap};
-use revm::interpreter::CallInputs;
 
 pub mod calldata_view;
 pub(crate) mod utils;
@@ -21,11 +21,8 @@ use v1::deployer::CONTRACT_DEPLOYER_ADDRESS;
 use v1::l1_messenger::L1_MESSENGER_ADDRESS;
 use v1::l2_base_token::L2_BASE_TOKEN_ADDRESS;
 
-type CustomPrecompile<CTX> = fn(
-    ctx: &mut CTX,
-    inputs: &CallInputs,
-    is_delegate: bool,
-) -> InterpreterResult;
+type CustomPrecompile<CTX> =
+    fn(ctx: &mut CTX, inputs: &CallInputs, is_delegate: bool) -> InterpreterResult;
 
 /// ZKsync OS precompile provider
 #[derive(Debug, Clone)]
@@ -142,9 +139,7 @@ where
             // If the code is loaded from different account it is a delegatecall
             let is_delegate = inputs.bytecode_address != inputs.target_address;
 
-            return Ok(Some(precompile_call(
-                context, &inputs, is_delegate,
-            )));
+            return Ok(Some(precompile_call(context, inputs, is_delegate)));
         }
 
         self.inner.run(context, inputs)

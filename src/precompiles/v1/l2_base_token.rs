@@ -1,13 +1,13 @@
 use std::vec::Vec;
 
+use super::l1_messenger::send_to_l1_inner;
+use crate::precompiles::calldata_view::CalldataView;
+use revm::interpreter::CallInputs;
 use revm::{
     context::{ContextTr, JournalTr},
     interpreter::{Gas, InstructionResult, InterpreterResult},
     primitives::{Address, U256, address},
 };
-use revm::interpreter::CallInputs;
-use super::l1_messenger::send_to_l1_inner;
-use crate::precompiles::calldata_view::CalldataView;
 
 pub const L2_BASE_TOKEN_ADDRESS: Address = address!("000000000000000000000000000000000000800a");
 

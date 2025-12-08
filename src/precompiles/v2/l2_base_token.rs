@@ -1,16 +1,14 @@
 use std::vec::Vec;
 
-use revm::{
-    context::{ContextTr, JournalTr},
-    interpreter::{
-        Gas, InstructionResult, InterpreterResult, gas::WARM_STORAGE_READ_COST,
-    },
-    primitives::{Address, B256, Bytes, Log, LogData, U256, address},
-};
-use revm::interpreter::CallInputs;
 use super::l1_messenger::send_to_l1_inner;
 use crate::precompiles::v2::gas_cost::{HOOK_BASE_GAS_COST, log_gas_cost};
 use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
+use revm::interpreter::CallInputs;
+use revm::{
+    context::{ContextTr, JournalTr},
+    interpreter::{Gas, InstructionResult, InterpreterResult, gas::WARM_STORAGE_READ_COST},
+    primitives::{Address, B256, Bytes, Log, LogData, U256, address},
+};
 
 pub const L2_BASE_TOKEN_ADDRESS: Address = address!("000000000000000000000000000000000000800a");
 

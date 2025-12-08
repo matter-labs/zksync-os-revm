@@ -1,3 +1,8 @@
+use crate::precompiles::v2::gas_cost::HOOK_BASE_GAS_COST;
+use crate::precompiles::{
+    calldata_view::CalldataView, v2::gas_cost::set_bytecode_details_extra_gas,
+};
+use revm::interpreter::CallInputs;
 use revm::{
     Database,
     context::JournalTr,
@@ -8,11 +13,6 @@ use revm::{
     },
     primitives::{Address, B256, Bytes, U256, address},
     state::Bytecode,
-};
-use revm::interpreter::CallInputs;
-use crate::precompiles::v2::gas_cost::HOOK_BASE_GAS_COST;
-use crate::precompiles::{
-    calldata_view::CalldataView, v2::gas_cost::set_bytecode_details_extra_gas,
 };
 
 // setBytecodeDetailsEVM(address,bytes32,uint32,bytes32) - f6eca0b0

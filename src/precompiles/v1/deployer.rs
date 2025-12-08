@@ -1,3 +1,5 @@
+use crate::precompiles::calldata_view::CalldataView;
+use revm::interpreter::CallInputs;
 use revm::{
     Database,
     context::JournalTr,
@@ -6,8 +8,6 @@ use revm::{
     primitives::{Address, B256, Bytes, U256, address},
     state::Bytecode,
 };
-use revm::interpreter::CallInputs;
-use crate::precompiles::calldata_view::CalldataView;
 
 // setBytecodeDetailsEVM(address,bytes32,uint32,bytes32) - f6eca0b0
 pub const SET_EVM_BYTECODE_DETAILS: &[u8] = &[0xf6, 0xec, 0xa0, 0xb0];

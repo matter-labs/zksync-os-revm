@@ -1,14 +1,14 @@
 use std::vec::Vec;
 
+use crate::precompiles::v2::gas_cost::{HOOK_BASE_GAS_COST, l1_message_gas_cost, log_gas_cost};
+use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
+use revm::interpreter::CallInputs;
 use revm::{
     context::JournalTr,
     context_interface::ContextTr,
     interpreter::{Gas, InstructionResult, InterpreterResult},
     primitives::{Address, B256, Bytes, Log, LogData, U256, address, keccak256},
 };
-use revm::interpreter::CallInputs;
-use crate::precompiles::v2::gas_cost::{HOOK_BASE_GAS_COST, l1_message_gas_cost, log_gas_cost};
-use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
 
 // sendToL1(bytes) - 62f84b24
 pub const SEND_TO_L1_SELECTOR: &[u8] = &[0x62, 0xf8, 0x4b, 0x24];
