@@ -1,4 +1,5 @@
 use crate::precompiles::calldata_view::CalldataView;
+use crate::precompiles::utils::{oog_error, revert};
 use revm::interpreter::CallInputs;
 use revm::{
     Database,
@@ -33,8 +34,6 @@ where
     let caller = inputs.caller;
     let call_value = inputs.value.get();
     let mut gas = Gas::new(inputs.gas_limit);
-    let oog_error = || InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
-    let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
 
     // Mirror the same behaviour as on ZKsync OS
     if is_delegate || call_value != U256::ZERO {

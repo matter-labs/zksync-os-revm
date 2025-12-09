@@ -1,5 +1,6 @@
 use std::vec::Vec;
 
+use crate::precompiles::utils::revert;
 use crate::precompiles::v2::gas_cost::{HOOK_BASE_GAS_COST, l1_message_gas_cost, log_gas_cost};
 use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
 use revm::interpreter::CallInputs;
@@ -28,39 +29,32 @@ pub(crate) fn send_to_l1_inner<CTX: ContextTr>(
     abi_encoded_message: Vec<u8>,
     caller: Address,
 ) -> Result<B256, InterpreterResult> {
-    let revert = |g: Gas| {
-        Err(InterpreterResult::new(
-            InstructionResult::Revert,
-            [].into(),
-            g,
-        ))
-    };
     let data = abi_encoded_message.as_slice();
 
     let abi_encoded_message_len: u32 = match data.len().try_into() {
         Ok(len) => len,
-        Err(_) => return revert(*gas),
+        Err(_) => return Err(revert(*gas)),
     };
 
     if abi_encoded_message_len < 32 {
-        return revert(*gas);
+        return Err(revert(*gas));
     }
 
     let message_offset: u32 = match U256::from_be_slice(&data[..32]).try_into() {
         Ok(offset) => offset,
-        Err(_) => return revert(*gas),
+        Err(_) => return Err(revert(*gas)),
     };
 
     if message_offset != 32 {
-        return revert(*gas);
+        return Err(revert(*gas));
     }
 
     let length_encoding_end = match message_offset.checked_add(32) {
         Some(length_encoding_end) => length_encoding_end,
-        None => return revert(*gas),
+        None => return Err(revert(*gas)),
     };
     if abi_encoded_message_len < length_encoding_end {
-        return revert(*gas);
+        return Err(revert(*gas));
     }
 
     let length: u32 = match U256::from_be_slice(
@@ -69,19 +63,19 @@ pub(crate) fn send_to_l1_inner<CTX: ContextTr>(
     .try_into()
     {
         Ok(length) => length,
-        Err(_) => return revert(*gas),
+        Err(_) => return Err(revert(*gas)),
     };
 
     let message_end = match length_encoding_end.checked_add(length) {
         Some(message_end) => message_end,
-        None => return revert(*gas),
+        None => return Err(revert(*gas)),
     };
     if abi_encoded_message_len < message_end {
-        return revert(*gas);
+        return Err(revert(*gas));
     }
 
     if !abi_encoded_message_len.is_multiple_of(32) {
-        return revert(*gas);
+        return Err(revert(*gas));
     }
     let message = &data[(length_encoding_end as usize)..message_end as usize];
 

@@ -1,6 +1,7 @@
 use std::vec::Vec;
 
 use crate::precompiles::calldata_view::CalldataView;
+use crate::precompiles::utils::revert;
 use revm::interpreter::CallInputs;
 use revm::{
     context::JournalTr,
@@ -32,7 +33,6 @@ pub(crate) fn send_to_l1_inner<CTX: ContextTr>(
     abi_encoded_message: Vec<u8>,
     caller: Address,
 ) -> InterpreterResult {
-    let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
     let data = abi_encoded_message.as_slice();
 
     let abi_encoded_message_len: u32 = match data.len().try_into() {

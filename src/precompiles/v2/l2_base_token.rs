@@ -1,6 +1,7 @@
 use std::vec::Vec;
 
 use super::l1_messenger::send_to_l1_inner;
+use crate::precompiles::utils::{oog_error, revert};
 use crate::precompiles::v2::gas_cost::{HOOK_BASE_GAS_COST, log_gas_cost};
 use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
 use revm::interpreter::CallInputs;
@@ -42,8 +43,6 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
     let view = CalldataView::new(ctx, &inputs.input);
     let calldata = view.as_slice();
     let mut gas = Gas::new(inputs.gas_limit);
-    let oog_error = || InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
-    let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
     // Mirror the same behaviour as on ZKsync OS
     if is_delegate {
         return revert(gas);
