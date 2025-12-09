@@ -152,9 +152,6 @@ where
             )?;
         }
 
-        // old balance is journaled before mint is incremented.
-        // let old_balance = caller_account.info.balance;
-
         let mut new_balance = caller_account.info.balance.saturating_add(U256::from(mint));
 
         let max_balance_spending = tx.max_balance_spending()?;
