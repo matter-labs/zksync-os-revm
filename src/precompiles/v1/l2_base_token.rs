@@ -85,11 +85,6 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
 
             drop(view);
 
-            // todo: replace below with `ctx.journal_mut().warm_access_list(list)`?
-            // ctx.journal_mut()
-            //     .warm_account(L2_BASE_TOKEN_ADDRESS)
-            //     .expect("warm account");
-
             ctx.journal_mut().touch_account(L2_BASE_TOKEN_ADDRESS);
             let mut from_account = ctx
                 .journal_mut()
@@ -100,12 +95,6 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
                 return revert(gas);
             };
             from_account.set_balance(from_balance_decr);
-            // todo: double-check that this is not needed anymore
-            // ctx.journal_mut().caller_accounting_journal_entry(
-            //     L2_BASE_TOKEN_ADDRESS,
-            //     balance_before,
-            //     false,
-            // );
 
             send_to_l1_inner(
                 ctx,
@@ -186,11 +175,6 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
 
             drop(view);
 
-            // todo: replace below with `ctx.journal_mut().warm_access_list(list)`?
-            // ctx.journal_mut()
-            //     .warm_account(L2_BASE_TOKEN_ADDRESS)
-            //     .expect("warm account");
-
             ctx.journal_mut().touch_account(L2_BASE_TOKEN_ADDRESS);
             let mut from_account = ctx
                 .journal_mut()
@@ -201,12 +185,6 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
                 return revert(gas);
             };
             from_account.set_balance(from_balance_decr);
-            // todo: double-check that this is not needed anymore
-            // ctx.journal_mut().caller_accounting_journal_entry(
-            //     L2_BASE_TOKEN_ADDRESS,
-            //     balance_before,
-            //     false,
-            // );
 
             send_to_l1_inner(ctx, &mut gas, message, L2_BASE_TOKEN_ADDRESS)
         }

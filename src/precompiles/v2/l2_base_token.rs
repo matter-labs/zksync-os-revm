@@ -124,9 +124,6 @@ fn withdraw<CTX: ContextTr>(ctx: &mut CTX, inputs: &CallInputs, mut gas: Gas) ->
         return revert(gas);
     };
     from_account.set_balance(from_balance_decr);
-    // todo: double-check that this is not needed anymore
-    // ctx.journal_mut()
-    //     .caller_accounting_journal_entry(L2_BASE_TOKEN_ADDRESS, balance_before, false);
 
     if let Err(interpreter_result) = send_to_l1_inner(
         ctx,
@@ -268,9 +265,6 @@ fn withdraw_with_message<CTX: ContextTr>(
         return revert(gas);
     };
     from_account.set_balance(from_balance_decr);
-    // todo: double-check that this is not needed anymore
-    // ctx.journal_mut()
-    //     .caller_accounting_journal_entry(L2_BASE_TOKEN_ADDRESS, balance_before, false);
     if let Err(interpreter_result) = send_to_l1_inner(ctx, &mut gas, message, L2_BASE_TOKEN_ADDRESS)
     {
         return interpreter_result;

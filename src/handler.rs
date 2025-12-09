@@ -187,11 +187,6 @@ where
             caller_account.bump_nonce();
         }
 
-        // NOTE: all changes to the caller account should journaled so in case of error
-        // we can revert the changes.
-        // todo: double-check that this is not needed anymore
-        // journal.caller_accounting_journal_entry(tx.caller(), old_balance, tx.kind().is_call());
-
         Ok(())
     }
 

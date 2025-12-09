@@ -109,10 +109,6 @@ where
                 &bytecode.original_bytes()[0..bytecode_length as usize],
             ));
             ctx.journal_mut().touch_account(address);
-            // todo: replace below with `ctx.journal_mut().warm_access_list(list)`?
-            // ctx.journal_mut()
-            //     .warm_account(address)
-            //     .expect("warm account");
             ctx.journal_mut().set_code(address, bytecode_padded);
             InterpreterResult::new(InstructionResult::Return, [].into(), gas)
         }
