@@ -2,7 +2,12 @@
 use core::str::FromStr;
 use revm::primitives::hardfork::{SpecId, UnknownHardfork};
 
-/// ZKsync OS spec id.
+/// Identifies which EVM variant should be used during execution.
+/// Differences between variants may include supported opcodes,
+/// available precompiles, and gas-charging rules.
+///
+/// Note: The ZKsync OS Server is responsible for mapping its own
+/// `ExecutionVersion` to one of these spec IDs.
 #[repr(u8)]
 #[derive(
     Clone,
