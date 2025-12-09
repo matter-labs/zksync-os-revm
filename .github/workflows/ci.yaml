@@ -20,9 +20,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Setup runner
-        uses: ./.github/actions/runner-setup
-
       - name: Build server
         run: cargo build --release --bin zksync-os-server
 
