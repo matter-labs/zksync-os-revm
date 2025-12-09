@@ -1,13 +1,13 @@
 use std::vec::Vec;
 
-use revm::{
-    context::{ContextTr, JournalTr},
-    interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
-    primitives::{Address, U256, address},
-};
-
 use super::l1_messenger::send_to_l1_inner;
 use crate::precompiles::calldata_view::CalldataView;
+use revm::interpreter::CallInputs;
+use revm::{
+    context::{ContextTr, JournalTr},
+    interpreter::{Gas, InstructionResult, InterpreterResult},
+    primitives::{Address, U256, address},
+};
 
 pub const L2_BASE_TOKEN_ADDRESS: Address = address!("000000000000000000000000000000000000800a");
 
@@ -23,16 +23,14 @@ pub const FINALIZE_ETH_WITHDRAWAL_SELECTOR: &[u8] = &[0x6c, 0x09, 0x60, 0xf9];
 /// Run the L2 base token precompile.
 pub fn l2_base_token_precompile_call<CTX: ContextTr>(
     ctx: &mut CTX,
-    inputs: &InputsImpl,
-    is_static: bool,
+    inputs: &CallInputs,
     is_delegate: bool,
-    gas_limit: u64,
 ) -> InterpreterResult {
     let view = CalldataView::new(ctx, &inputs.input);
     let calldata = view.as_slice();
-    let caller = inputs.caller_address;
-    let call_value = inputs.call_value;
-    let mut gas = Gas::new(gas_limit);
+    let caller = inputs.caller;
+    let call_value = inputs.value.get();
+    let mut gas = Gas::new(inputs.gas_limit);
     let oog_error = || InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
     // Mirror the same behaviour as on ZKsync OS
@@ -49,7 +47,7 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
     }
 
     // Check after charging the gas
-    if is_static {
+    if inputs.is_static {
         return revert(gas);
     }
 
@@ -87,26 +85,16 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
 
             drop(view);
 
-            ctx.journal_mut()
-                .warm_account(L2_BASE_TOKEN_ADDRESS)
-                .expect("warm account");
-
             ctx.journal_mut().touch_account(L2_BASE_TOKEN_ADDRESS);
             let mut from_account = ctx
                 .journal_mut()
-                .load_account(L2_BASE_TOKEN_ADDRESS)
+                .load_account_with_code_mut(L2_BASE_TOKEN_ADDRESS)
                 .expect("load account");
-            let from_balance = &mut from_account.info.balance;
-            let balance_before = *from_balance;
-            let Some(from_balance_decr) = from_balance.checked_sub(call_value) else {
+            let balance_before = from_account.info.balance;
+            let Some(from_balance_decr) = balance_before.checked_sub(call_value) else {
                 return revert(gas);
             };
-            *from_balance = from_balance_decr;
-            ctx.journal_mut().caller_accounting_journal_entry(
-                L2_BASE_TOKEN_ADDRESS,
-                balance_before,
-                false,
-            );
+            from_account.set_balance(from_balance_decr);
 
             send_to_l1_inner(
                 ctx,
@@ -187,26 +175,16 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
 
             drop(view);
 
-            ctx.journal_mut()
-                .warm_account(L2_BASE_TOKEN_ADDRESS)
-                .expect("warm account");
-
             ctx.journal_mut().touch_account(L2_BASE_TOKEN_ADDRESS);
             let mut from_account = ctx
                 .journal_mut()
-                .load_account(L2_BASE_TOKEN_ADDRESS)
+                .load_account_with_code_mut(L2_BASE_TOKEN_ADDRESS)
                 .expect("load account");
-            let from_balance = &mut from_account.info.balance;
-            let balance_before = *from_balance;
-            let Some(from_balance_decr) = from_balance.checked_sub(call_value) else {
+            let balance_before = from_account.info.balance;
+            let Some(from_balance_decr) = balance_before.checked_sub(call_value) else {
                 return revert(gas);
             };
-            *from_balance = from_balance_decr;
-            ctx.journal_mut().caller_accounting_journal_entry(
-                L2_BASE_TOKEN_ADDRESS,
-                balance_before,
-                false,
-            );
+            from_account.set_balance(from_balance_decr);
 
             send_to_l1_inner(ctx, &mut gas, message, L2_BASE_TOKEN_ADDRESS)
         }

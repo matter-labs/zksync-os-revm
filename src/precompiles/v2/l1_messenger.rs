@@ -1,14 +1,14 @@
 use std::vec::Vec;
 
+use crate::precompiles::v2::gas_cost::{HOOK_BASE_GAS_COST, l1_message_gas_cost, log_gas_cost};
+use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
+use revm::interpreter::CallInputs;
 use revm::{
     context::JournalTr,
     context_interface::ContextTr,
-    interpreter::{Gas, InputsImpl, InstructionResult, InterpreterResult},
+    interpreter::{Gas, InstructionResult, InterpreterResult},
     primitives::{Address, B256, Bytes, Log, LogData, U256, address, keccak256},
 };
-
-use crate::precompiles::v2::gas_cost::{HOOK_BASE_GAS_COST, l1_message_gas_cost, log_gas_cost};
-use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
 
 // sendToL1(bytes) - 62f84b24
 pub const SEND_TO_L1_SELECTOR: &[u8] = &[0x62, 0xf8, 0x4b, 0x24];
@@ -119,16 +119,14 @@ pub(crate) fn send_to_l1_inner<CTX: ContextTr>(
 /// Run the L1 messenger precompile.
 pub fn l1_messenger_precompile_call<CTX: ContextTr>(
     ctx: &mut CTX,
-    inputs: &InputsImpl,
-    is_static: bool,
+    inputs: &CallInputs,
     is_delegate: bool,
-    gas_limit: u64,
 ) -> InterpreterResult {
     let view = CalldataView::new(ctx, &inputs.input);
     let calldata = view.as_slice();
-    let caller = inputs.caller_address;
-    let call_value = inputs.call_value;
-    let mut gas = Gas::new(gas_limit);
+    let caller = inputs.caller;
+    let call_value = inputs.value.get();
+    let mut gas = Gas::new(inputs.gas_limit);
     let revert = |g: Gas| InterpreterResult::new(InstructionResult::Revert, [].into(), g);
     // Mirror the same behaviour as on ZKsync OS
     if is_delegate || call_value != U256::ZERO {
@@ -142,7 +140,7 @@ pub fn l1_messenger_precompile_call<CTX: ContextTr>(
     }
 
     // Check after charging the gas
-    if is_static {
+    if inputs.is_static {
         return revert(gas);
     }
 

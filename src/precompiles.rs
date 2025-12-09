@@ -1,15 +1,17 @@
 //! Contains ZKsync OS specific precompiles.
 use crate::ZkSpecId;
+use revm::interpreter::CallInputs;
 use revm::{
     context::Cfg,
     context_interface::ContextTr,
     handler::{EthPrecompiles, PrecompileProvider},
-    interpreter::{InputsImpl, InterpreterResult},
+    interpreter::InterpreterResult,
     precompile::{Precompiles, bn254, hash, identity, modexp, secp256k1, secp256r1},
     primitives::{Address, OnceLock},
 };
 use std::string::String;
 use std::{boxed::Box, collections::HashMap};
+
 pub mod calldata_view;
 pub(crate) mod utils;
 pub mod v1;
@@ -19,13 +21,8 @@ use v1::deployer::CONTRACT_DEPLOYER_ADDRESS;
 use v1::l1_messenger::L1_MESSENGER_ADDRESS;
 use v1::l2_base_token::L2_BASE_TOKEN_ADDRESS;
 
-type CustomPrecompile<CTX> = fn(
-    ctx: &mut CTX,
-    inputs: &InputsImpl,
-    is_static: bool,
-    is_delegate: bool,
-    gas_limit: u64,
-) -> InterpreterResult;
+type CustomPrecompile<CTX> =
+    fn(ctx: &mut CTX, inputs: &CallInputs, is_delegate: bool) -> InterpreterResult;
 
 /// ZKsync OS precompile provider
 #[derive(Debug, Clone)]
@@ -136,23 +133,16 @@ where
     fn run(
         &mut self,
         context: &mut CTX,
-        address: &Address,
-        inputs: &InputsImpl,
-        is_static: bool,
-        gas_limit: u64,
+        inputs: &CallInputs,
     ) -> Result<Option<Self::Output>, String> {
-        if let Some(precompile_call) = self.custom_precompiles.get(address) {
+        if let Some(precompile_call) = self.custom_precompiles.get(&inputs.bytecode_address) {
             // If the code is loaded from different account it is a delegatecall
-            let delegate =
-                matches!(inputs.bytecode_address, Some(addr) if addr != inputs.target_address);
+            let is_delegate = inputs.bytecode_address != inputs.target_address;
 
-            return Ok(Some(precompile_call(
-                context, inputs, is_static, delegate, gas_limit,
-            )));
+            return Ok(Some(precompile_call(context, inputs, is_delegate)));
         }
 
-        self.inner
-            .run(context, address, inputs, is_static, gas_limit)
+        self.inner.run(context, inputs)
     }
 
     #[inline]
