@@ -83,18 +83,6 @@ pub(crate) fn send_to_l1_inner<CTX: ContextTr>(
     }
     let message = &data[(length_encoding_end as usize)..message_end as usize];
 
-    // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
-    // let words = (message.len() as u64).div_ceil(32);
-    // let keccak256_gas = KECCAK256.saturating_add(KECCAK256WORD.saturating_mul(words));
-    // let log_gas = LOG
-    //     .saturating_add(LOGTOPIC.saturating_mul(3))
-    //     .saturating_add(LOGDATA.saturating_mul(message.len() as u64));
-    // let needed_gas = keccak256_gas + log_gas;
-    // if !gas.record_cost(needed_gas) {
-    //     // Out-of-gas error
-    //     return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
-    // }
-
     let message_hash = keccak256(message);
     let log = Log {
         address: L1_MESSENGER_ADDRESS,
@@ -131,10 +119,6 @@ pub fn l1_messenger_precompile_call<CTX: ContextTr>(
         return revert(gas);
     }
 
-    // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
-    // Also, in the current version of ZKsync OS, this precompile charges 10 ergs,
-    // which is a fraction of gas. Here we charge exactly 1 gas for simplicity,
-    // as it will be fixed with proper gas charging.
     if !gas.record_cost(1) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));

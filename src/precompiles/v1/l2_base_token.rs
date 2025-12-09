@@ -38,10 +38,6 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
         return revert(gas);
     }
 
-    // TODO(zksync-os/pull/318): Proper gas charging is not yet merged.
-    // Also, in the current version of ZKsync OS, this precompile charges 10 ergs,
-    // which is a fraction of gas. Here we charge exactly 1 gas for simplicity,
-    // as it will be fixed with proper gas charging.
     if !gas.record_cost(1) {
         return oog_error();
     }

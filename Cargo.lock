@@ -2862,5 +2862,4 @@ dependencies = [
  "auto_impl",
  "revm",
  "serde",
- "serde_derive",
 ]
