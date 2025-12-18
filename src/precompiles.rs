@@ -153,7 +153,7 @@ where
         Box::new(
             self.inner
                 .warm_addresses()
-                .filter(|x| x != &u64_to_address(P256VERIFY_ADDRESS)),
+                .filter(|x| *x != u64_to_address(P256VERIFY_ADDRESS)),
         )
     }
 
