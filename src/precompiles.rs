@@ -1,6 +1,8 @@
 //! Contains ZKsync OS specific precompiles.
 use crate::ZkSpecId;
 use revm::interpreter::CallInputs;
+use revm::precompile::secp256r1::P256VERIFY_ADDRESS;
+use revm::precompile::u64_to_address;
 use revm::{
     context::Cfg,
     context_interface::ContextTr,
@@ -147,7 +149,12 @@ where
 
     #[inline]
     fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
-        self.inner.warm_addresses()
+        // TODO: temporary workaround to not warm P256 precompile
+        Box::new(
+            self.inner
+                .warm_addresses()
+                .filter(|x| *x != u64_to_address(P256VERIFY_ADDRESS)),
+        )
     }
 
     #[inline]
