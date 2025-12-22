@@ -3,6 +3,7 @@ use crate::precompiles::v2::gas_cost::HOOK_BASE_GAS_COST;
 use crate::precompiles::{
     calldata_view::CalldataView, v2::gas_cost::set_bytecode_details_extra_gas,
 };
+use revm::context_interface::Cfg;
 use revm::interpreter::CallInputs;
 use revm::{
     Database,
@@ -23,8 +24,6 @@ pub const CONTRACT_DEPLOYER_ADDRESS: Address = address!("00000000000000000000000
 
 pub const L2_GENESIS_UPGRADE_ADDRESS: Address =
     address!("000000000000000000000000000000000000800f");
-
-pub const MAX_CODE_SIZE: usize = 0x6000;
 
 /// Run the deployer precompile.
 pub fn deployer_precompile_call<CTX: ContextTr>(
@@ -93,7 +92,7 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
             // Although this can be called as a part of protocol upgrade,
             // we are checking the next invariants, just in case
             // EIP-158: reject code of length > 24576.
-            if bytecode_length as usize > MAX_CODE_SIZE {
+            if bytecode_length as usize > ctx.cfg().max_code_size() {
                 return revert(gas);
             }
 
