@@ -105,8 +105,7 @@ where
             ));
             ctx.journal_mut().touch_account(address);
             ctx.journal_mut()
-                .warm_coinbase_account(address)
-                .expect("warm account");
+                .warm_coinbase_account(address);
             ctx.journal_mut().set_code(address, bytecode_padded);
             InterpreterResult::new(InstructionResult::Return, [].into(), gas)
         }
