@@ -128,6 +128,8 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
             }
 
             ctx.journal_mut().touch_account(address);
+            ctx.journal_mut()
+                .load_account(address);
             ctx.journal_mut().set_code(address, bytecode_padded);
             InterpreterResult::new(InstructionResult::Return, [].into(), gas)
         }
