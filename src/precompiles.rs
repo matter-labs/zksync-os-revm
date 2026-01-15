@@ -58,7 +58,7 @@ impl<CTX: ContextTr> ZKsyncPrecompiles<CTX> {
                         bn254::add::ISTANBUL,
                         bn254::mul::ISTANBUL,
                         bn254::pair::ISTANBUL,
-                        secp256r1::P256VERIFY,
+                        secp256r1::P256VERIFY_OSAKA,
                     ]);
                     precompiles
                 })
