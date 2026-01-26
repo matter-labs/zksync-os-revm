@@ -1,5 +1,6 @@
 use crate::precompiles::calldata_view::CalldataView;
 use crate::precompiles::utils::{oog_error, revert};
+use revm::context::Cfg;
 use revm::interpreter::CallInputs;
 use revm::{
     Database,
@@ -89,7 +90,7 @@ where
             // Although this can be called as a part of protocol upgrade,
             // we are checking the next invariants, just in case
             // EIP-158: reject code of length > 24576.
-            if bytecode_length as usize > MAX_CODE_SIZE {
+            if bytecode_length as usize > ctx.cfg().max_code_size() {
                 return revert(gas);
             }
 
