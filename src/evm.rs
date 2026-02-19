@@ -19,7 +19,7 @@ pub struct ZKsyncEvm<
     CTX,
     INSP,
     I = EthInstructions<EthInterpreter, CTX>,
-    P = ZKsyncPrecompiles<CTX>,
+    P = ZKsyncPrecompiles,
     F = EthFrame<EthInterpreter>,
 >(
     /// Inner EVM type.
@@ -27,7 +27,7 @@ pub struct ZKsyncEvm<
 );
 
 impl<CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>, INSP>
-    ZKsyncEvm<CTX, INSP, EthInstructions<EthInterpreter, CTX>, ZKsyncPrecompiles<CTX>>
+    ZKsyncEvm<CTX, INSP, EthInstructions<EthInterpreter, CTX>, ZKsyncPrecompiles>
 {
     /// Create a new ZKsync OS EVM.
     pub fn new(ctx: CTX, inspector: INSP) -> Self {

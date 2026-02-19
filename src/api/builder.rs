@@ -11,7 +11,7 @@ use revm::{
 
 /// Type alias for default ZKsyncEvm
 pub type DefaultZKsyncEvm<CTX, INSP = ()> =
-    ZKsyncEvm<CTX, INSP, EthInstructions<EthInterpreter, CTX>, ZKsyncPrecompiles<CTX>>;
+    ZKsyncEvm<CTX, INSP, EthInstructions<EthInterpreter, CTX>, ZKsyncPrecompiles>;
 
 /// Trait that allows for ZKsyncEvm to be built.
 pub trait ZkBuilder: Sized {
