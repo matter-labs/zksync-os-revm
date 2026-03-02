@@ -136,8 +136,6 @@ where
         let is_eip3607_disabled = ctx.cfg().is_eip3607_disabled();
         let is_nonce_check_disabled = ctx.cfg().is_nonce_check_disabled();
 
-        let mint = ctx.tx().mint().unwrap_or_default();
-
         let (tx, journal) = ctx.tx_journal_mut();
 
         let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
@@ -152,11 +150,19 @@ where
             )?;
         }
 
-        let mut new_balance = caller_account.info.balance.saturating_add(U256::from(mint));
+        // For L1->L2 transactions, we only credit the tx value so the initial value transfer succeeds.
+        // On ZKsync OS, the mint value isn’t added to msg.sender.balance until the transaction finishes.
+        if is_l1_to_l2_tx {
+            let new_balance = caller_account.info.balance.saturating_add(tx.value());
+            caller_account.touch();
+            caller_account.set_balance(new_balance);
+            return Ok(());
+        }
 
+        let mut new_balance = caller_account.info.balance;
         let max_balance_spending = tx.max_balance_spending()?;
 
-        if !is_l1_to_l2_tx && max_balance_spending > new_balance {
+        if max_balance_spending > new_balance {
             // skip max balance check for deposit transactions.
             // this check for deposit was skipped previously in `validate_tx_against_state` function
             return Err(InvalidTransaction::LackOfFundForMaxFee {
@@ -192,38 +198,41 @@ where
         evm: &mut Self::Evm,
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
-        reimburse_caller(evm.ctx(), frame_result.gas(), U256::ZERO)?;
+        if !evm.ctx().tx().is_l1_to_l2_tx() {
+            reimburse_caller(evm.ctx(), frame_result.gas(), U256::ZERO)?;
+            return Ok(());
+        }
 
-        let is_l1_to_l2_tx = evm.ctx().tx().is_l1_to_l2_tx();
-        if is_l1_to_l2_tx {
-            let caller = evm.ctx().tx().caller();
-            let refund_recipient = evm
-                .ctx()
-                .tx()
-                .refund_recipient()
-                .expect("Refund recipient is missing for L1 -> L2 tx");
+        // For L1->L2 transactions, mint and gas fees were not applied to the
+        // sender before execution. Handle all balance accounting here.
+        let caller = evm.ctx().tx().caller();
+        let refund_recipient = evm
+            .ctx()
+            .tx()
+            .refund_recipient()
+            .expect("Refund recipient is missing for L1 -> L2 tx");
 
-            let basefee = evm.ctx().block().basefee() as u128;
-            let effective_gas_price = evm.ctx().tx().effective_gas_price(basefee);
-            let spent_fee =
-                U256::from(frame_result.gas().spent()) * U256::from(effective_gas_price);
-            let mint = evm.ctx().tx().mint().unwrap_or_default();
-            let value = evm.ctx().tx().value();
+        let basefee = evm.ctx().block().basefee() as u128;
+        let effective_gas_price = evm.ctx().tx().effective_gas_price(basefee);
+        let spent_fee = U256::from(frame_result.gas().spent()) * U256::from(effective_gas_price);
+        let mint = evm.ctx().tx().mint().unwrap_or_default();
+        let value = evm.ctx().tx().value();
 
-            // Did the call succeed?
-            let is_success = frame_result.interpreter_result().result.is_ok();
+        let is_success = frame_result.interpreter_result().result.is_ok();
 
-            let additional_refund = if is_success {
-                mint - value - spent_fee
-            } else {
-                mint - spent_fee
-            };
-
-            // // Return balance of not spend gas.
+        if !is_success {
+            // On failure, value transfer was rolled back so sender still holds
+            // the extra `value` credited before execution. Move it to refund_recipient.
             evm.ctx()
                 .journal_mut()
-                .transfer(caller, refund_recipient, additional_refund)?;
+                .transfer(caller, refund_recipient, value)?;
         }
+
+        // Mint the remaining refund directly to refund_recipient.
+        evm.ctx()
+            .journal_mut()
+            .balance_incr(refund_recipient, mint - value - spent_fee)?;
+
         Ok(())
     }
 

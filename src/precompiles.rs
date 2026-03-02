@@ -148,11 +148,15 @@ where
 
     #[inline]
     fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
+        // Warm Blake2 (0x09) and Point Evaluation (0x0a) addresses even though
+        // they are not active precompiles.
+        let extra = [u64_to_address(9), u64_to_address(10)].into_iter();
         // TODO: temporary workaround to not warm P256 precompile
         Box::new(
             self.inner
                 .warm_addresses()
-                .filter(|x| *x != u64_to_address(P256VERIFY_ADDRESS)),
+                .filter(|x| *x != u64_to_address(P256VERIFY_ADDRESS))
+                .chain(extra),
         )
     }
 
