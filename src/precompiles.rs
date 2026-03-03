@@ -18,10 +18,15 @@ pub mod calldata_view;
 pub(crate) mod utils;
 pub mod v1;
 pub mod v2;
+pub mod v3;
 
 use v1::deployer::CONTRACT_DEPLOYER_ADDRESS;
 use v1::l1_messenger::L1_MESSENGER_ADDRESS;
 use v1::l2_base_token::L2_BASE_TOKEN_ADDRESS;
+
+use v3::l1_messenger::L1_MESSENGER_HOOK_ADDRESS;
+use v3::mint_base_token::MINT_BASE_TOKEN_HOOK_ADDRESS;
+use v3::set_bytecode_on_address::SET_BYTECODE_ON_ADDRESS_HOOK_ADDRESS;
 
 type CustomPrecompile<CTX> =
     fn(ctx: &mut CTX, inputs: &CallInputs, is_delegate: bool) -> InterpreterResult;
@@ -60,6 +65,23 @@ fn maybe_call_custom_precompile<CTX: ContextTr>(
             }
             _ => return None,
         },
+        ZkSpecId::AtlasV3 => match precompile_address {
+            CONTRACT_DEPLOYER_ADDRESS => {
+                v3::deployer::deployer_precompile_call as CustomPrecompile<_>
+            }
+            MINT_BASE_TOKEN_HOOK_ADDRESS => {
+                v3::mint_base_token::mint_base_token_precompile_call as CustomPrecompile<_>
+            }
+            SET_BYTECODE_ON_ADDRESS_HOOK_ADDRESS => {
+                v3::set_bytecode_on_address::set_bytecode_on_address_precompile_call
+                    as CustomPrecompile<_>
+            }
+            L1_MESSENGER_HOOK_ADDRESS => {
+                v3::l1_messenger::l1_messenger_precompile_call as CustomPrecompile<_>
+            }
+
+            _ => return None,
+        },
     };
 
     let is_delegate = inputs.bytecode_address != inputs.target_address;
@@ -80,7 +102,7 @@ impl ZKsyncPrecompiles {
     #[inline]
     pub fn new_with_spec(spec: ZkSpecId) -> Self {
         let precompiles = match spec {
-            ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => {
+            ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 | ZkSpecId::AtlasV3 => {
                 static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
                 INSTANCE.get_or_init(|| {
                     let mut precompiles = Precompiles::default();
