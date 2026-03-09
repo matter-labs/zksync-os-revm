@@ -163,8 +163,6 @@ where
         let max_balance_spending = tx.max_balance_spending()?;
 
         if max_balance_spending > new_balance {
-            // skip max balance check for deposit transactions.
-            // this check for deposit was skipped previously in `validate_tx_against_state` function
             return Err(InvalidTransaction::LackOfFundForMaxFee {
                 fee: Box::new(max_balance_spending),
                 balance: Box::new(new_balance),
@@ -186,7 +184,7 @@ where
         caller_account.set_balance(new_balance);
 
         // Bump the nonce for calls. Nonce for CREATE will be bumped in `handle_create`.
-        if !is_l1_to_l2_tx && tx.kind().is_call() {
+        if tx.kind().is_call() {
             caller_account.bump_nonce();
         }
 
@@ -214,7 +212,7 @@ where
 
         let basefee = evm.ctx().block().basefee() as u128;
         let effective_gas_price = evm.ctx().tx().effective_gas_price(basefee);
-        let spent_fee = U256::from(frame_result.gas().spent()) * U256::from(effective_gas_price);
+        let spent_fee = U256::from(frame_result.gas().used()) * U256::from(effective_gas_price);
         let mint = evm.ctx().tx().mint().unwrap_or_default();
         let value = evm.ctx().tx().value();
 
