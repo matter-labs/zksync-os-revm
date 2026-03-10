@@ -25,8 +25,10 @@ use revm::{
         CallOutcome, Gas, InitialAndFloorGas, InstructionResult, InterpreterResult,
         interpreter::EthInterpreter, interpreter_action::FrameInit,
     },
-    primitives::U256,
+    primitives::{Address, U256, address},
 };
+
+pub const BASE_TOKEN_HOLDER_ADDRESS: Address = address!("0000000000000000000000000000000000010011");
 
 /// ZKsync OS handler extends the [`Handler`] with ZKsync OS specific logic.
 #[derive(Debug, Clone)]
