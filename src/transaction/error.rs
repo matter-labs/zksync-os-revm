@@ -10,6 +10,8 @@ use revm::context_interface::{
 pub enum ZKsyncTxError {
     /// Base transaction error.
     Base(InvalidTransaction),
+    /// Post-execution transfer for L1->L2 accounting failed.
+    PostExecutionTransferFailed(&'static str),
 }
 
 impl TransactionError for ZKsyncTxError {}
@@ -18,6 +20,7 @@ impl Display for ZKsyncTxError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Base(error) => error.fmt(f),
+            Self::PostExecutionTransferFailed(msg) => write!(f, "{msg}"),
         }
     }
 }

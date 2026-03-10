@@ -141,6 +141,19 @@ where
 
         let (tx, journal) = ctx.tx_journal_mut();
 
+        if is_l1_to_l2_tx {
+            let mut base_token_holder_account = journal
+                .load_account_with_code_mut(BASE_TOKEN_HOLDER_ADDRESS)?
+                .data;
+            base_token_holder_account.touch();
+            let res = base_token_holder_account.decr_balance(tx.value());
+            if !res {
+                panic!(
+                    "Base token holder does not have enough balance to cover the mint value for L1 -> L2 tx. This should never happen because the balance is managed off-chain and should always be sufficient."
+                );
+            }
+        }
+
         let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
 
         if !is_l1_to_l2_tx {
@@ -230,9 +243,19 @@ where
         }
 
         // Mint the remaining refund directly to refund_recipient.
-        evm.ctx()
+        evm.ctx().journal_mut().transfer(
+            BASE_TOKEN_HOLDER_ADDRESS,
+            refund_recipient,
+            mint - value - spent_fee,
+        )?;
+
+        let mut base_token_holder_account = evm
+            .ctx()
             .journal_mut()
-            .balance_incr(refund_recipient, mint - value - spent_fee)?;
+            .load_account_with_code_mut(BASE_TOKEN_HOLDER_ADDRESS)?
+            .data;
+
+        base_token_holder_account.decr_balance(spent_fee);
 
         Ok(())
     }
