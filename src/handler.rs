@@ -10,6 +10,7 @@ use revm::{
     context_interface::{
         Block, Cfg, ContextTr, JournalTr, Transaction,
         context::ContextError,
+        journaled_state::account::JournaledAccountTr,
         result::{EVMError, ExecutionResult, FromStringError, HaltReason},
     },
     handler::{
@@ -143,7 +144,7 @@ where
         if !is_l1_to_l2_tx {
             // validates account nonce and code
             validate_account_nonce_and_code(
-                &caller_account.info,
+                &caller_account.account().info,
                 tx.nonce(),
                 is_eip3607_disabled,
                 is_nonce_check_disabled,
@@ -153,13 +154,13 @@ where
         // For L1->L2 transactions, we only credit the tx value so the initial value transfer succeeds.
         // On ZKsync OS, the mint value isn’t added to msg.sender.balance until the transaction finishes.
         if is_l1_to_l2_tx {
-            let new_balance = caller_account.info.balance.saturating_add(tx.value());
+            let new_balance = caller_account.balance().saturating_add(tx.value());
             caller_account.touch();
             caller_account.set_balance(new_balance);
             return Ok(());
         }
 
-        let mut new_balance = caller_account.info.balance;
+        let mut new_balance = *caller_account.balance();
         let max_balance_spending = tx.max_balance_spending()?;
 
         if max_balance_spending > new_balance {
@@ -281,13 +282,18 @@ where
 
         // === forced-fail short-circuit ===
         let mut exec_result = if evm.ctx().tx().force_fail() {
-            let (tx, journal) = evm.ctx().tx_journal_mut();
-            let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
-            if tx.kind().is_create() {
-                // Bump the nonce for creates, because usually it is handled in `handle_create`.
-                // And force faillure doesn't call the actual execution.
-                caller_account.bump_nonce();
-            }
+            {
+                let (tx, journal) = evm.ctx().tx_journal_mut();
+                let caller = tx.caller();
+                let is_create = tx.kind().is_create();
+                let mut caller_account = journal.load_account_with_code_mut(caller)?.data;
+                if is_create {
+                    // Bump the nonce for creates, because usually it is handled in `handle_create`.
+                    // And force faillure doesn't call the actual execution.
+                    caller_account.bump_nonce();
+                }
+            } // caller_account, tx, journal dropped here — releases the borrow on evm
+
             // Synthesize a top-level REVERT frame result (no state changes).
             // 1) Make an InterpreterResult with REVERT + returndata.
             let ir = InterpreterResult::new(

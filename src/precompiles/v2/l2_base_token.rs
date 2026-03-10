@@ -7,6 +7,7 @@ use crate::precompiles::{calldata_view::CalldataView, utils::b160_to_b256};
 use revm::interpreter::CallInputs;
 use revm::{
     context::{ContextTr, JournalTr},
+    context_interface::journaled_state::account::JournaledAccountTr,
     interpreter::{Gas, InstructionResult, InterpreterResult, gas::WARM_STORAGE_READ_COST},
     primitives::{Address, B256, Bytes, Log, LogData, U256, address},
 };
@@ -114,15 +115,17 @@ fn withdraw<CTX: ContextTr>(ctx: &mut CTX, inputs: &CallInputs, mut gas: Gas) ->
     }
 
     ctx.journal_mut().touch_account(L2_BASE_TOKEN_ADDRESS);
-    let mut from_account = ctx
-        .journal_mut()
-        .load_account_with_code_mut(L2_BASE_TOKEN_ADDRESS)
-        .expect("load account");
-    let balance_before = from_account.info.balance;
-    let Some(from_balance_decr) = balance_before.checked_sub(inputs.value.get()) else {
-        return revert(gas);
-    };
-    from_account.set_balance(from_balance_decr);
+    {
+        let mut from_account = ctx
+            .journal_mut()
+            .load_account_with_code_mut(L2_BASE_TOKEN_ADDRESS)
+            .expect("load account");
+        let balance_before = *from_account.balance();
+        let Some(from_balance_decr) = balance_before.checked_sub(inputs.value.get()) else {
+            return revert(gas);
+        };
+        from_account.set_balance(from_balance_decr);
+    } // from_account dropped here — releases borrow on ctx
 
     if let Err(interpreter_result) = send_to_l1_inner(
         ctx,
@@ -255,15 +258,17 @@ fn withdraw_with_message<CTX: ContextTr>(
     }
 
     ctx.journal_mut().touch_account(L2_BASE_TOKEN_ADDRESS);
-    let mut from_account = ctx
-        .journal_mut()
-        .load_account_with_code_mut(L2_BASE_TOKEN_ADDRESS)
-        .expect("load account");
-    let balance_before = from_account.info.balance;
-    let Some(from_balance_decr) = balance_before.checked_sub(inputs.value.get()) else {
-        return revert(gas);
-    };
-    from_account.set_balance(from_balance_decr);
+    {
+        let mut from_account = ctx
+            .journal_mut()
+            .load_account_with_code_mut(L2_BASE_TOKEN_ADDRESS)
+            .expect("load account");
+        let balance_before = *from_account.balance();
+        let Some(from_balance_decr) = balance_before.checked_sub(inputs.value.get()) else {
+            return revert(gas);
+        };
+        from_account.set_balance(from_balance_decr);
+    } // from_account dropped here — releases borrow on ctx
     if let Err(interpreter_result) = send_to_l1_inner(ctx, &mut gas, message, L2_BASE_TOKEN_ADDRESS)
     {
         return interpreter_result;
