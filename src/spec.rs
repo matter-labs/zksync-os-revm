@@ -40,7 +40,7 @@ impl ZkSpecId {
 
     /// Checks if the [`ZkSpecId`] is enabled in the other [`ZkSpecId`].
     pub const fn is_enabled_in(self, other: ZkSpecId) -> bool {
-        other as u8 <= self as u8
+        self as u8 <= other as u8
     }
 }
 
