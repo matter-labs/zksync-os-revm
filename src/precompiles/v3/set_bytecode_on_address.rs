@@ -87,8 +87,8 @@ pub fn set_bytecode_on_address_parse_calldata(
     Ok((address, bytecode_hash, bytecode_length))
 }
 
-pub fn set_bytecode_on_address_internal<'a, CTX: ContextTr>(
-    ctx: &'a mut CTX,
+pub fn set_bytecode_on_address_internal<CTX: ContextTr>(
+    ctx: &mut CTX,
     address: Address,
     bytecode_hash: B256,
     bytecode_length: u32,

@@ -43,7 +43,7 @@ pub fn mint_base_token_precompile_call<CTX: ContextTr>(
         return revert(gas);
     }
 
-    let value_to_mint = U256::from_be_slice(&calldata);
+    let value_to_mint = U256::from_be_slice(calldata);
 
     // finished reading calldata, release borrow before mutating context
     drop(view);
