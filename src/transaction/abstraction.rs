@@ -29,7 +29,9 @@ pub trait ZkTxTr: Transaction {
 
     fn force_fail(&self) -> bool;
 
-    fn is_service_tx(&self) -> bool;
+    fn is_service_tx(&self) -> bool {
+        false
+    }
 }
 
 /// ZKsync OS transaction.
