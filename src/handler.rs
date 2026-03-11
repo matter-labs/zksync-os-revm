@@ -3,6 +3,7 @@ use std::boxed::Box;
 
 use crate::{
     api::exec::ZkContextTr,
+    spec::ZkSpecId,
     transaction::{ZKsyncTxError, ZkTxTr},
 };
 use revm::{
@@ -12,13 +13,11 @@ use revm::{
         context::ContextError,
         journaled_state::account::JournaledAccountTr,
         result::{EVMError, ExecutionResult, FromStringError, HaltReason},
+        transaction::TransactionType,
     },
     handler::{
-        EthFrame, EvmTr, FrameResult, Handler, MainnetHandler,
-        evm::FrameTr,
-        handler::EvmTrError,
-        post_execution::{self, reimburse_caller},
-        pre_execution::validate_account_nonce_and_code,
+        EthFrame, EvmTr, FrameResult, Handler, MainnetHandler, evm::FrameTr, handler::EvmTrError,
+        post_execution, pre_execution::validate_account_nonce_and_code,
     },
     inspector::{Inspector, InspectorEvmTr, InspectorHandler},
     interpreter::{
@@ -87,6 +86,46 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
         // Normalize as a regular top-level frame return.
         self.last_frame_result(evm, &mut frame_result)?;
         Ok(frame_result)
+    }
+
+    #[inline]
+    fn effective_gas_price_for_spec<TX: Transaction>(
+        tx: &TX,
+        base_fee: u128,
+        spec_id: ZkSpecId,
+    ) -> u128 {
+        match spec_id {
+            ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => tx.effective_gas_price(base_fee),
+            ZkSpecId::AtlasV3 => {
+                if base_fee == 0 {
+                    0
+                } else {
+                    tx.effective_gas_price(base_fee)
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn effective_balance_spending_for_spec<TX: Transaction>(
+        tx: &TX,
+        base_fee: u128,
+        blob_price: u128,
+        spec_id: ZkSpecId,
+    ) -> Result<U256, InvalidTransaction> {
+        let mut effective_balance_spending = (tx.gas_limit() as u128)
+            .checked_mul(Self::effective_gas_price_for_spec(tx, base_fee, spec_id))
+            .and_then(|gas_cost| U256::from(gas_cost).checked_add(tx.value()))
+            .ok_or(InvalidTransaction::OverflowPaymentInTransaction)?;
+
+        if tx.tx_type() == TransactionType::Eip4844 as u8 {
+            let blob_gas = tx.total_blob_gas() as u128;
+            effective_balance_spending = effective_balance_spending
+                .checked_add(U256::from(blob_price.saturating_mul(blob_gas)))
+                .ok_or(InvalidTransaction::OverflowPaymentInTransaction)?;
+        }
+
+        Ok(effective_balance_spending)
     }
 }
 
@@ -239,9 +278,10 @@ where
             .into());
         }
 
-        let effective_balance_spending = tx
-            .effective_balance_spending(basefee, blob_price)
-            .expect("effective balance is always smaller than max balance so it can't overflow");
+        let effective_balance_spending = Self::effective_balance_spending_for_spec(
+            tx, basefee, blob_price, spec_id,
+        )
+        .expect("effective balance is always smaller than max balance so it can't overflow");
 
         // subtracting max balance spending with value that is going to be deducted later in the call.
         let gas_balance_spending = effective_balance_spending - tx.value();
@@ -266,7 +306,18 @@ where
         frame_result: &mut <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
     ) -> Result<(), Self::Error> {
         if !evm.ctx().tx().is_l1_to_l2_tx() {
-            reimburse_caller(evm.ctx(), frame_result.gas(), U256::ZERO)?;
+            let basefee = evm.ctx().block().basefee() as u128;
+            let spec_id = evm.ctx().cfg().spec();
+            let caller = evm.ctx().tx().caller();
+            let effective_gas_price =
+                Self::effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
+            let refund = U256::from(effective_gas_price.saturating_mul(
+                (frame_result.gas().remaining() + frame_result.gas().refunded() as u64) as u128,
+            ));
+            evm.ctx()
+                .journal_mut()
+                .load_account_mut(caller)?
+                .incr_balance(refund);
             return Ok(());
         }
 
@@ -280,12 +331,12 @@ where
             .expect("Refund recipient is missing for L1 -> L2 tx");
 
         let basefee = evm.ctx().block().basefee() as u128;
-        let effective_gas_price = evm.ctx().tx().effective_gas_price(basefee);
+        let spec_id = evm.ctx().cfg().spec();
+        let effective_gas_price =
+            Self::effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
         let spent_fee = U256::from(frame_result.gas().used()) * U256::from(effective_gas_price);
         let mint = evm.ctx().tx().mint().unwrap_or_default();
         let value = evm.ctx().tx().value();
-
-        let spec_id = evm.ctx().cfg().spec();
 
         match spec_id {
             crate::spec::ZkSpecId::AtlasV1 | crate::spec::ZkSpecId::AtlasV2 => {
@@ -333,7 +384,9 @@ where
     ) -> Result<(), Self::Error> {
         let beneficiary = evm.ctx().block().beneficiary();
         let basefee = evm.ctx().block().basefee() as u128;
-        let effective_gas_price = evm.ctx().tx().effective_gas_price(basefee);
+        let spec_id = evm.ctx().cfg().spec();
+        let effective_gas_price =
+            Self::effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
 
         // reward beneficiary
         evm.ctx().journal_mut().balance_incr(
