@@ -214,14 +214,12 @@ where
     type HaltReason = HaltReason;
 
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        // Do not perform any additional validation for L1 -> L2 transactions, they are pre-verified on Settlement Layer.
         let ctx = evm.ctx();
         let tx = ctx.tx();
         if tx.is_l1_to_l2_tx() {
             return Ok(());
         }
 
-        // Do not perform any extra validation for L1 -> L2 transactions, they are pre-verified on L1.
         self.mainnet.validate_env(evm)
     }
 
@@ -420,9 +418,12 @@ where
             let caller = evm.ctx().tx().caller();
             let effective_gas_price =
                 Self::effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
-            let refund = U256::from(effective_gas_price.saturating_mul(
-                (frame_result.gas().remaining() + frame_result.gas().refunded() as u64) as u128,
-            ));
+            // Clamp defensively to avoid accidental wrap if call ordering changes.
+            let refunded_gas = frame_result.gas().refunded().max(0) as u64;
+            let refund = U256::from(
+                effective_gas_price
+                    .saturating_mul((frame_result.gas().remaining() + refunded_gas) as u128),
+            );
             evm.ctx()
                 .journal_mut()
                 .load_account_mut(caller)?

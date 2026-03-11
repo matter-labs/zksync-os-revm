@@ -12,7 +12,7 @@ pub const L1_MESSENGER_HOOK_ADDRESS: Address = address!("00000000000000000000000
 
 pub const L1_MESSENGER_ADDRESS: Address = address!("0000000000000000000000000000000000008008");
 
-/// Run the mint base token precompile.
+/// Run the L1 messenger precompile.
 pub fn l1_messenger_precompile_call<CTX: ContextTr>(
     ctx: &mut CTX,
     inputs: &CallInputs,
@@ -24,14 +24,14 @@ pub fn l1_messenger_precompile_call<CTX: ContextTr>(
     let call_value = inputs.value.get();
     let gas = Gas::new(inputs.gas_limit);
 
-    let allowed_callers = vec![L1_MESSENGER_ADDRESS];
+    let allowed_callers = [L1_MESSENGER_ADDRESS];
     if let Some(early_return) = zksync_os_hook_input_check(
         inputs,
         &caller,
         is_delegate,
         call_value,
         gas,
-        allowed_callers,
+        &allowed_callers,
     ) {
         return early_return;
     }

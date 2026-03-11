@@ -13,9 +13,6 @@ use revm::{
 
 // setBytecodeDetailsEVM(address,bytes32,uint32,bytes32) - f6eca0b0
 pub const SET_EVM_BYTECODE_DETAILS: &[u8] = &[0xf6, 0xec, 0xa0, 0xb0];
-// Contract Deployer system hook (contract) needed for all envs (force deploy)
-pub const CONTRACT_DEPLOYER_ADDRESS: Address = address!("0000000000000000000000000000000000008006");
-
 pub const L2_GENESIS_UPGRADE_ADDRESS: Address =
     address!("000000000000000000000000000000000000800f");
 
@@ -33,26 +30,26 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
     let call_value = inputs.value.get();
     let gas = Gas::new(inputs.gas_limit);
 
-    let allowed_callers = vec![L2_GENESIS_UPGRADE_ADDRESS];
+    let allowed_callers = [L2_GENESIS_UPGRADE_ADDRESS];
     if let Some(early_return) = zksync_os_hook_input_check(
         inputs,
         &caller,
         is_delegate,
         call_value,
         gas,
-        allowed_callers,
+        &allowed_callers,
     ) {
         return early_return;
+    }
+
+    if calldata.len() < 4 {
+        return revert(gas);
     }
 
     let mut selector = [0u8; 4];
     selector.copy_from_slice(&calldata[..4]);
     match selector {
         s if s == SET_EVM_BYTECODE_DETAILS => {
-            if inputs.is_static {
-                return revert(gas);
-            }
-
             // in future we need to handle regular(not genesis) protocol upgrades
             if caller != L2_GENESIS_UPGRADE_ADDRESS {
                 return revert(gas);

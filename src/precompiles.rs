@@ -199,6 +199,6 @@ where
 
 impl Default for ZKsyncPrecompiles {
     fn default() -> Self {
-        Self::new_with_spec(ZkSpecId::AtlasV2)
+        Self::new_with_spec(ZkSpecId::default())
     }
 }

@@ -27,14 +27,14 @@ pub fn mint_base_token_precompile_call<CTX: ContextTr>(
     let call_value = inputs.value.get();
     let gas = Gas::new(inputs.gas_limit);
 
-    let allowed_callers = vec![L2_BASE_TOKEN_ADDRESS];
+    let allowed_callers = [L2_BASE_TOKEN_ADDRESS];
     if let Some(early_return) = zksync_os_hook_input_check(
         inputs,
         &caller,
         is_delegate,
         call_value,
         gas,
-        allowed_callers,
+        &allowed_callers,
     ) {
         return early_return;
     }

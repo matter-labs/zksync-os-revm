@@ -1,6 +1,6 @@
 use crate::precompiles::calldata_view::CalldataView;
 use crate::precompiles::utils::{oog_error, revert};
-use crate::precompiles::v3::common::zksync_os_hook_input_check;
+use crate::precompiles::v3::common::{CONTRACT_DEPLOYER_ADDRESS, zksync_os_hook_input_check};
 use crate::precompiles::v3::deployer::MAX_CODE_SIZE;
 use crate::precompiles::v3::gas_cost::set_bytecode_details_extra_gas;
 use revm::Database;
@@ -18,9 +18,7 @@ use revm::{
 pub const SET_BYTECODE_ON_ADDRESS_HOOK_ADDRESS: Address =
     address!("0000000000000000000000000000000000007002");
 
-pub const CONTRACT_DEPLOYER_ADDRESS: Address = address!("0000000000000000000000000000000000008006");
-
-/// Run the mint base token precompile.
+/// Run the set-bytecode-on-address precompile.
 pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr>(
     ctx: &mut CTX,
     inputs: &CallInputs,
@@ -32,14 +30,14 @@ pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr>(
     let call_value = inputs.value.get();
     let gas = Gas::new(inputs.gas_limit);
 
-    let allowed_callers = vec![CONTRACT_DEPLOYER_ADDRESS];
+    let allowed_callers = [CONTRACT_DEPLOYER_ADDRESS];
     if let Some(early_return) = zksync_os_hook_input_check(
         inputs,
         &caller,
         is_delegate,
         call_value,
         gas,
-        allowed_callers,
+        &allowed_callers,
     ) {
         return early_return;
     }
@@ -71,7 +69,7 @@ pub fn set_bytecode_on_address_parse_calldata(
 
     let address = Address::from_slice(&calldata[12..32]);
 
-    let bytecode_hash = B256::from_slice(calldata[32..64].try_into().expect("Always valid"));
+    let bytecode_hash = B256::from_slice(&calldata[32..64]);
 
     let bytecode_length: u32 = match U256::from_be_slice(&calldata[64..96]).try_into() {
         Ok(length) => length,
@@ -106,9 +104,13 @@ pub fn set_bytecode_on_address_internal<'a, CTX: ContextTr>(
         .db_mut()
         .code_by_hash(bytecode_hash)
         .expect("The bytecode is expected to be pre-loaded for any deployer precompile call");
+    let bytecode_length = bytecode_length as usize;
+    if bytecode.original_bytes().len() < bytecode_length {
+        return revert(gas);
+    }
 
     let bytecode_padded = Bytecode::new_legacy(Bytes::copy_from_slice(
-        &bytecode.original_bytes()[0..bytecode_length as usize],
+        &bytecode.original_bytes()[0..bytecode_length],
     ));
     let account = ctx
         .journal_mut()
