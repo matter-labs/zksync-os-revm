@@ -139,20 +139,9 @@ where
         let is_eip3607_disabled = ctx.cfg().is_eip3607_disabled();
         let is_nonce_check_disabled = ctx.cfg().is_nonce_check_disabled();
 
-        let (tx, journal) = ctx.tx_journal_mut();
+        let spec_id = ctx.cfg().spec();
 
-        if is_l1_to_l2_tx {
-            let mut base_token_holder_account = journal
-                .load_account_with_code_mut(BASE_TOKEN_HOLDER_ADDRESS)?
-                .data;
-            base_token_holder_account.touch();
-            let res = base_token_holder_account.decr_balance(tx.value());
-            if !res {
-                panic!(
-                    "Base token holder does not have enough balance to cover the mint value for L1 -> L2 tx. This should never happen because the balance is managed off-chain and should always be sufficient."
-                );
-            }
-        }
+        let (tx, journal) = ctx.tx_journal_mut();
 
         let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
 
@@ -169,10 +158,18 @@ where
         // For L1->L2 transactions, we only credit the tx value so the initial value transfer succeeds.
         // On ZKsync OS, the mint value isn’t added to msg.sender.balance until the transaction finishes.
         if is_l1_to_l2_tx {
-            let new_balance = caller_account.balance().saturating_add(tx.value());
-            caller_account.touch();
-            caller_account.set_balance(new_balance);
-            return Ok(());
+            match spec_id {
+                crate::spec::ZkSpecId::AtlasV1 | crate::ZkSpecId::AtlasV2 => {
+                    let new_balance = caller_account.balance().saturating_add(tx.value());
+                    caller_account.touch();
+                    caller_account.set_balance(new_balance);
+                    return Ok(());
+                }
+                crate::spec::ZkSpecId::AtlasV3 => {
+                    // On AtlasV3, mint is separate from the value transfer
+                    return Ok(());
+                }
+            }
         }
 
         let mut new_balance = *caller_account.balance();
@@ -232,30 +229,43 @@ where
         let mint = evm.ctx().tx().mint().unwrap_or_default();
         let value = evm.ctx().tx().value();
 
-        let is_success = frame_result.interpreter_result().result.is_ok();
+        let spec_id = evm.ctx().cfg().spec();
 
-        if !is_success {
-            // On failure, value transfer was rolled back so sender still holds
-            // the extra `value` credited before execution. Move it to refund_recipient.
-            evm.ctx()
-                .journal_mut()
-                .transfer(caller, refund_recipient, value)?;
-        }
+        match spec_id {
+            crate::spec::ZkSpecId::AtlasV1 | crate::spec::ZkSpecId::AtlasV2 => {
+                let is_success = frame_result.interpreter_result().result.is_ok();
 
-        // Mint the remaining refund directly to refund_recipient.
-        evm.ctx().journal_mut().transfer(
-            BASE_TOKEN_HOLDER_ADDRESS,
-            refund_recipient,
-            mint - value - spent_fee,
-        )?;
+                if !is_success {
+                    // On failure, value transfer was rolled back so sender still holds
+                    // the extra `value` credited before execution. Move it to refund_recipient.
+                    evm.ctx()
+                        .journal_mut()
+                        .transfer(caller, refund_recipient, value)?;
+                }
 
-        let mut base_token_holder_account = evm
-            .ctx()
-            .journal_mut()
-            .load_account_with_code_mut(BASE_TOKEN_HOLDER_ADDRESS)?
-            .data;
+                // Mint the remaining refund directly to refund_recipient.
+                evm.ctx()
+                    .journal_mut()
+                    .balance_incr(refund_recipient, mint - value - spent_fee)?;
+            }
+            crate::spec::ZkSpecId::AtlasV3 => {
+                // On AtlasV3 value is separated from the mint, so we don't need to handle it here.
 
-        base_token_holder_account.decr_balance(spent_fee);
+                // Mint the remaining refund directly to refund_recipient.
+                evm.ctx().journal_mut().transfer(
+                    BASE_TOKEN_HOLDER_ADDRESS,
+                    refund_recipient,
+                    mint - spent_fee,
+                )?;
+                let mut base_token_holder_account = evm
+                    .ctx()
+                    .journal_mut()
+                    .load_account_with_code_mut(BASE_TOKEN_HOLDER_ADDRESS)?
+                    .data;
+
+                base_token_holder_account.decr_balance(spent_fee);
+            }
+        };
 
         Ok(())
     }
