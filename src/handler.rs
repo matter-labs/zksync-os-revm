@@ -48,6 +48,46 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
             _phantom: core::marker::PhantomData,
         }
     }
+
+    fn forced_fail_execution_result(&mut self, evm: &mut EVM) -> Result<FrameResult, ERROR>
+    where
+        EVM: EvmTr<Context: ZkContextTr, Frame = FRAME>,
+        ERROR: EvmTrError<EVM> + From<ZKsyncTxError> + FromStringError + IsTxError,
+        FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
+    {
+        {
+            let (tx, journal) = evm.ctx().tx_journal_mut();
+            let caller = tx.caller();
+            let is_create = tx.kind().is_create();
+            let mut caller_account = journal.load_account_with_code_mut(caller)?.data;
+            if is_create {
+                // Bump the nonce for creates, because usually it is handled in `handle_create`.
+                // Forced failure doesn't call the actual execution path.
+                caller_account.bump_nonce();
+            }
+        } // release tx/journal borrows
+
+        // Synthesize a top-level REVERT frame result (no state changes).
+        let ir = InterpreterResult::new(
+            InstructionResult::Revert,
+            Default::default(),
+            Gas::new_spent(0),
+        );
+        let mut frame_result = FrameResult::Call(CallOutcome::new(ir, 0..0));
+
+        // Rewrite gas to match ZKsync OS semantics.
+        let gas_limit = evm.ctx().tx().gas_limit();
+        let gas_used = evm.ctx().tx().gas_used_override().unwrap_or(gas_limit);
+        let used = gas_used.min(gas_limit);
+        let unused = gas_limit - used;
+        let gas = frame_result.gas_mut();
+        *gas = Gas::new_spent(gas_limit);
+        gas.erase_cost(unused);
+
+        // Normalize as a regular top-level frame return.
+        self.last_frame_result(evm, &mut frame_result)?;
+        Ok(frame_result)
+    }
 }
 
 impl<EVM, ERROR, FRAME> Default for ZKsyncHandler<EVM, ERROR, FRAME> {
@@ -125,6 +165,22 @@ where
         }
 
         Ok(())
+    }
+
+    fn execution(
+        &mut self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &InitialAndFloorGas,
+    ) -> Result<FrameResult, Self::Error> {
+        if evm.ctx().tx().force_fail() {
+            return self.forced_fail_execution_result(evm);
+        }
+
+        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
+        self.last_frame_result(evm, &mut frame_result)?;
+        Ok(frame_result)
     }
 
     fn validate_against_state_and_deduct_caller(
@@ -307,60 +363,6 @@ where
 
         Ok(exec_result)
     }
-
-    fn run_without_catch_error(
-        &mut self,
-        evm: &mut Self::Evm,
-    ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        let init_and_floor_gas = self.validate(evm)?;
-        let eip7702_refund = self.pre_execution(evm)? as i64;
-
-        // === forced-fail short-circuit ===
-        let mut exec_result = if evm.ctx().tx().force_fail() {
-            {
-                let (tx, journal) = evm.ctx().tx_journal_mut();
-                let caller = tx.caller();
-                let is_create = tx.kind().is_create();
-                let mut caller_account = journal.load_account_with_code_mut(caller)?.data;
-                if is_create {
-                    // Bump the nonce for creates, because usually it is handled in `handle_create`.
-                    // And force faillure doesn't call the actual execution.
-                    caller_account.bump_nonce();
-                }
-            } // caller_account, tx, journal dropped here — releases the borrow on evm
-
-            // Synthesize a top-level REVERT frame result (no state changes).
-            // 1) Make an InterpreterResult with REVERT + returndata.
-            let ir = InterpreterResult::new(
-                InstructionResult::Revert,
-                Default::default(),
-                Gas::new_spent(0),
-            );
-            // 2) Wrap it as a CallOutcome; memory range is irrelevant here.
-            let mut fr = FrameResult::Call(CallOutcome::new(ir, 0..0));
-
-            let gas_limit = evm.ctx().tx().gas_limit();
-            let gas_used = evm.ctx().tx().gas_used_override().unwrap_or(gas_limit);
-
-            // 3) Set gas to match your ZK usage now (limit – unused).
-            let used = gas_used.min(gas_limit);
-            let unused = gas_limit - used;
-            let gas = fr.gas_mut();
-            *gas = Gas::new_spent(gas_limit);
-            gas.erase_cost(unused);
-
-            // Ensure gas object is initialized the same way a normal top-level return would do.
-            // last_frame_result() sets `Gas::new_spent(gas_limit)` and handles "remaining" & refund flags.
-            self.last_frame_result(evm, &mut fr)?;
-
-            fr
-        } else {
-            self.execution(evm, &init_and_floor_gas)?
-        };
-
-        self.post_execution(evm, &mut exec_result, init_and_floor_gas, eip7702_refund)?;
-        self.execution_result(evm, exec_result)
-    }
 }
 
 impl<EVM, ERROR> InspectorHandler for ZKsyncHandler<EVM, ERROR, EthFrame<EthInterpreter>>
@@ -373,4 +375,20 @@ where
     ERROR: EvmTrError<EVM> + From<ZKsyncTxError> + FromStringError + IsTxError,
 {
     type IT = EthInterpreter;
+
+    fn inspect_execution(
+        &mut self,
+        evm: &mut Self::Evm,
+        init_and_floor_gas: &InitialAndFloorGas,
+    ) -> Result<FrameResult, Self::Error> {
+        if evm.ctx().tx().force_fail() {
+            return self.forced_fail_execution_result(evm);
+        }
+
+        let gas_limit = evm.ctx().tx().gas_limit() - init_and_floor_gas.initial_gas;
+        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
+        self.last_frame_result(evm, &mut frame_result)?;
+        Ok(frame_result)
+    }
 }
