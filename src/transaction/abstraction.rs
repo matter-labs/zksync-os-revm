@@ -46,6 +46,7 @@ pub struct ZKsyncTx<T: Transaction> {
     /// The execution status (success/revert) from the original ZKsync OS environment.
     pub force_fail: bool,
     /// Marks service transactions (type `0x7d`) that should not participate in nonce semantics.
+    #[serde(default)]
     pub service_tx: bool,
 }
 
@@ -318,6 +319,7 @@ impl From<TxEnvBuildError> for ZkBuilderror {
 mod tests {
     use super::*;
     use revm::{context_interface::Transaction, primitives::Address};
+    use serde_json::Value;
 
     #[test]
     fn test_deposit_transaction_fields() {
@@ -339,5 +341,46 @@ mod tests {
         // Verify gas related calculations - deposit transactions use gas_price for effective gas price
         assert_eq!(zk_tx.effective_gas_price(90), 95);
         assert_eq!(zk_tx.max_fee_per_gas(), 100);
+    }
+
+    #[test]
+    fn test_service_tx_default_is_false() {
+        let tx_from_build = ZKsyncTx::builder().build().unwrap();
+        let tx_from_build_fill = ZKsyncTx::builder().build_fill();
+
+        assert!(!tx_from_build.service_tx);
+        assert!(!tx_from_build_fill.service_tx);
+    }
+
+    #[test]
+    fn test_service_tx_builder_persists_to_build_and_build_fill() {
+        let tx_from_build = ZKsyncTx::builder().service_tx(true).build().unwrap();
+        let tx_from_build_fill = ZKsyncTx::builder().service_tx(true).build_fill();
+
+        assert!(tx_from_build.service_tx);
+        assert!(tx_from_build_fill.service_tx);
+        assert!(tx_from_build.is_service_tx());
+        assert!(tx_from_build_fill.is_service_tx());
+    }
+
+    #[test]
+    fn test_service_tx_serde_compatibility_and_roundtrip() {
+        let tx = ZKsyncTx::builder().service_tx(true).build_fill();
+        let serialized = serde_json::to_value(&tx).expect("serialize tx");
+
+        let mut legacy_like = serialized.clone();
+        let removed = legacy_like
+            .as_object_mut()
+            .expect("serialized tx must be object")
+            .remove("service_tx");
+        assert_eq!(removed, Some(Value::Bool(true)));
+
+        let deserialized_legacy: ZKsyncTx<TxEnv> =
+            serde_json::from_value(legacy_like).expect("deserialize legacy tx");
+        assert!(!deserialized_legacy.service_tx);
+
+        let roundtrip: ZKsyncTx<TxEnv> =
+            serde_json::from_value(serialized).expect("deserialize roundtrip tx");
+        assert!(roundtrip.service_tx);
     }
 }
