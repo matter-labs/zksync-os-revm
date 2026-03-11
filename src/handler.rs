@@ -362,14 +362,17 @@ where
         }
 
         let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
+        let is_service_tx = tx.is_service_tx();
 
-        // validates account nonce and code
-        validate_account_nonce_and_code(
-            &caller_account.account().info,
-            tx.nonce(),
-            is_eip3607_disabled,
-            is_nonce_check_disabled,
-        )?;
+        if !is_service_tx {
+            // validates account nonce and code
+            validate_account_nonce_and_code(
+                &caller_account.account().info,
+                tx.nonce(),
+                is_eip3607_disabled,
+                is_nonce_check_disabled,
+            )?;
+        }
 
         let mut new_balance = *caller_account.balance();
         let max_balance_spending = tx.max_balance_spending()?;
@@ -397,7 +400,7 @@ where
         caller_account.set_balance(new_balance);
 
         // Bump the nonce for calls. Nonce for CREATE will be bumped in `handle_create`.
-        if tx.kind().is_call() {
+        if tx.kind().is_call() && !is_service_tx {
             caller_account.bump_nonce();
         }
 

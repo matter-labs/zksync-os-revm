@@ -28,6 +28,8 @@ pub trait ZkTxTr: Transaction {
     fn gas_used_override(&self) -> Option<u64>;
 
     fn force_fail(&self) -> bool;
+
+    fn is_service_tx(&self) -> bool;
 }
 
 /// ZKsync OS transaction.
@@ -41,6 +43,8 @@ pub struct ZKsyncTx<T: Transaction> {
     pub gas_used_override: Option<u64>,
     /// The execution status (success/revert) from the original ZKsync OS environment.
     pub force_fail: bool,
+    /// Marks service transactions (type `0x7d`) that should not participate in nonce semantics.
+    pub service_tx: bool,
 }
 
 impl<T: Transaction> AsRef<T> for ZKsyncTx<T> {
@@ -57,6 +61,7 @@ impl<T: Transaction> ZKsyncTx<T> {
             l1_to_l2_part: L1ToL2TransactionParts::default(),
             gas_used_override: None,
             force_fail: false,
+            service_tx: false,
         }
     }
 }
@@ -75,6 +80,7 @@ impl Default for ZKsyncTx<TxEnv> {
             l1_to_l2_part: L1ToL2TransactionParts::default(),
             gas_used_override: None,
             force_fail: false,
+            service_tx: false,
         }
     }
 }
@@ -192,6 +198,10 @@ impl<T: Transaction> ZkTxTr for ZKsyncTx<T> {
     fn force_fail(&self) -> bool {
         self.force_fail
     }
+
+    fn is_service_tx(&self) -> bool {
+        self.service_tx
+    }
 }
 
 /// Builder for constructing [`ZKsyncTx`] instances
@@ -201,6 +211,7 @@ pub struct ZKsyncTxBuilder {
     l1_to_l2_part: L1ToL2TransactionParts,
     gas_used_override: Option<u64>,
     force_fail: bool,
+    service_tx: bool,
 }
 
 impl ZKsyncTxBuilder {
@@ -211,6 +222,7 @@ impl ZKsyncTxBuilder {
             l1_to_l2_part: L1ToL2TransactionParts::default(),
             gas_used_override: None,
             force_fail: false,
+            service_tx: false,
         }
     }
 
@@ -240,6 +252,12 @@ impl ZKsyncTxBuilder {
         self
     }
 
+    /// Marks transaction as service tx (nonced-less tx replay path).
+    pub fn service_tx(mut self, service_tx: bool) -> Self {
+        self.service_tx = service_tx;
+        self
+    }
+
     /// Set the refund recipient of the L1 -> L2 part of the transaction.
     pub fn refund_recipient(mut self, refund_recipient: Option<Address>) -> Self {
         self.l1_to_l2_part.refund_recipient = refund_recipient;
@@ -260,6 +278,7 @@ impl ZKsyncTxBuilder {
             l1_to_l2_part: self.l1_to_l2_part,
             gas_used_override: self.gas_used_override,
             force_fail: self.force_fail,
+            service_tx: self.service_tx,
         }
     }
 
@@ -273,6 +292,7 @@ impl ZKsyncTxBuilder {
             l1_to_l2_part: self.l1_to_l2_part,
             gas_used_override: self.gas_used_override,
             force_fail: self.force_fail,
+            service_tx: self.service_tx,
         })
     }
 }
