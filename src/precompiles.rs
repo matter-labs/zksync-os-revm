@@ -191,7 +191,7 @@ where
                         ZkSpecId::AtlasV3 => true,
                     }
                 })
-                .chain(extra.into_iter()),
+                .chain(extra),
         )
     }
 
