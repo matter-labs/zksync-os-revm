@@ -171,15 +171,28 @@ where
     #[inline]
     fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
         let spec = self.spec;
-        Box::new(self.inner.warm_addresses().filter(move |x| {
-            match spec {
-                ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => {
-                    // Old versions did not warm P256 precompile, so we need to filter it out.
-                    *x != u64_to_address(P256VERIFY_ADDRESS)
-                }
-                ZkSpecId::AtlasV3 => true,
+        // Historical versions warmed Blake2 (0x09) and Point Evaluation (0x0a)
+        // even though they are not active precompiles.
+        let extra = match spec {
+            ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => {
+                vec![u64_to_address(9), u64_to_address(10)]
             }
-        }))
+            ZkSpecId::AtlasV3 => vec![],
+        };
+        Box::new(
+            self.inner
+                .warm_addresses()
+                .filter(move |x| {
+                    match spec {
+                        ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => {
+                            // Old versions did not warm P256 precompile, so we need to filter it out.
+                            *x != u64_to_address(P256VERIFY_ADDRESS)
+                        }
+                        ZkSpecId::AtlasV3 => true,
+                    }
+                })
+                .chain(extra.into_iter()),
+        )
     }
 
     #[inline]
