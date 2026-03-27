@@ -515,9 +515,11 @@ where
         )
         .expect("effective balance is always smaller than max balance so it can't overflow");
 
+        // subtracting max balance spending with value that is going to be deducted later in the call.
         let gas_balance_spending = effective_balance_spending - tx.value();
         new_balance = new_balance.saturating_sub(gas_balance_spending);
 
+        // Touch account so we know it is changed.
         caller_account.touch();
         caller_account.set_balance(new_balance);
 
