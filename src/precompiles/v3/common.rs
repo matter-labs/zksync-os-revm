@@ -6,6 +6,7 @@ use revm::{
 use crate::precompiles::utils::revert;
 
 pub const CONTRACT_DEPLOYER_ADDRESS: Address = address!("0000000000000000000000000000000000008006");
+pub const COMPLEX_UPGRADER_ADDRESS: Address = address!("000000000000000000000000000000000000800f");
 
 pub fn zksync_os_hook_input_check(
     inputs: &CallInputs,
