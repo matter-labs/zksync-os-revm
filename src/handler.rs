@@ -102,11 +102,16 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
     }
 
     #[inline]
-    fn effective_gas_price_for_spec<TX: Transaction>(
+    fn effective_gas_price_for_spec<TX: ZkTxTr>(
         tx: &TX,
         base_fee: u128,
         spec_id: ZkSpecId,
     ) -> u128 {
+        // L1->L2 transactions use their own gas_price set on L1,
+        // independent of the L2 block base_fee.
+        if tx.is_l1_to_l2_tx() {
+            return tx.effective_gas_price(base_fee);
+        }
         if ZkSpecId::AtlasV3.is_enabled_in(spec_id) && base_fee == 0 {
             0
         } else {
@@ -115,7 +120,7 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
     }
 
     #[inline]
-    fn effective_balance_spending_for_spec<TX: Transaction>(
+    fn effective_balance_spending_for_spec<TX: ZkTxTr>(
         tx: &TX,
         base_fee: u128,
         blob_price: u128,
