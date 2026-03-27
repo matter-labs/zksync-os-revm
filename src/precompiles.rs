@@ -79,7 +79,6 @@ fn maybe_call_custom_precompile<CTX: ContextTr>(
             L1_MESSENGER_HOOK_ADDRESS => {
                 v3::l1_messenger::l1_messenger_precompile_call as CustomPrecompile<_>
             }
-
             _ => return None,
         },
     };
