@@ -417,14 +417,18 @@ where
             // Reimburse sender and reward beneficiary using the rewritten Gas.
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
-            self.notify_l1_asset_tracker(evm, exec_result)?;
+            if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
+                self.notify_l1_asset_tracker(evm, exec_result)?;
+            }
         } else {
             // Vanilla path: keep default EVM accounting
             self.refund(evm, exec_result, eip7702_gas_refund);
             self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
-            self.notify_l1_asset_tracker(evm, exec_result)?;
+            if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
+                self.notify_l1_asset_tracker(evm, exec_result)?;
+            }
         }
 
         Ok(())
