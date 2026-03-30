@@ -227,7 +227,13 @@ where
             .tx()
             .settlement_layer_chain_id()
             .ok_or_else(|| ERROR::from_string("Missing settlement-layer chain id".into()))?;
-        let gas_price = U256::from(evm.ctx().tx().gas_price());
+        let basefee = evm.ctx().block().basefee() as u128;
+        let spec_id = evm.ctx().cfg().spec();
+        let gas_price = U256::from(Self::effective_gas_price_for_spec(
+            evm.ctx().tx(),
+            basefee,
+            spec_id,
+        ));
         let gas_limit = U256::from(evm.ctx().tx().gas_limit());
         let max_fee_commitment = gas_price
             .checked_mul(gas_limit)
