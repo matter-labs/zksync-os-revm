@@ -3,6 +3,7 @@ use std::boxed::Box;
 
 use crate::{
     api::exec::ZkContextTr,
+    constants::{BASE_TOKEN_HOLDER_ADDRESS, L2_ASSET_TRACKER_ADDRESS, L2_BASE_TOKEN_ADDRESS},
     spec::ZkSpecId,
     transaction::{ZKsyncTxError, ZkTxTr},
 };
@@ -24,13 +25,10 @@ use revm::{
         CallOutcome, Gas, InitialAndFloorGas, InstructionResult, InterpreterResult,
         interpreter::EthInterpreter, interpreter_action::FrameInit,
     },
-    primitives::{Address, Bytes, U256, address},
+    primitives::{Bytes, U256},
     state::EvmState,
 };
 
-const L2_BASE_TOKEN_ADDRESS: Address = address!("000000000000000000000000000000000000800a");
-const L2_ASSET_TRACKER_ADDRESS: Address = address!("000000000000000000000000000000000001000f");
-const BASE_TOKEN_HOLDER_ADDRESS: Address = address!("0000000000000000000000000000000000010011");
 const HANDLE_FINALIZE_BASE_TOKEN_BRIDGING_ON_L2_SELECTOR: [u8; 4] = [0x03, 0x11, 0x7c, 0x8c];
 
 #[derive(Clone, Copy, Debug)]

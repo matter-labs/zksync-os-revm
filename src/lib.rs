@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 pub mod api;
+pub mod constants;
 pub mod evm;
 pub mod handler;
 pub mod precompiles;
