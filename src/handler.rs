@@ -314,6 +314,8 @@ where
             return Ok(());
         }
 
+        // A revert here means token accounting is broken — treat as a fatal system error,
+        // matching ZKsync OS bootloader behavior which returns internal_error!() on revert.
         Err(ERROR::from_string(
             "L2AssetTracker.handleFinalizeBaseTokenBridgingOnL2 reverted during L1 replay".into(),
         ))
