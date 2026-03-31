@@ -3,13 +3,14 @@ use std::boxed::Box;
 
 use crate::{
     api::exec::ZkContextTr,
+    constants::{BASE_TOKEN_HOLDER_ADDRESS, L2_ASSET_TRACKER_ADDRESS, L2_BASE_TOKEN_ADDRESS},
     spec::ZkSpecId,
     transaction::{ZKsyncTxError, ZkTxTr},
 };
 use revm::{
     context::{LocalContextTr, result::InvalidTransaction},
     context_interface::{
-        Block, Cfg, ContextTr, JournalTr, Transaction,
+        Block, Cfg, ContextSetters, ContextTr, JournalTr, Transaction,
         context::ContextError,
         journaled_state::account::JournaledAccountTr,
         result::{EVMError, ExecutionResult, FromStringError, HaltReason},
@@ -17,17 +18,18 @@ use revm::{
     },
     handler::{
         EthFrame, EvmTr, FrameResult, Handler, MainnetHandler, evm::FrameTr, handler::EvmTrError,
-        post_execution, pre_execution::validate_account_nonce_and_code,
+        post_execution, pre_execution::validate_account_nonce_and_code, system_call::SystemCallTx,
     },
     inspector::{Inspector, InspectorEvmTr, InspectorHandler},
     interpreter::{
         CallOutcome, Gas, InitialAndFloorGas, InstructionResult, InterpreterResult,
         interpreter::EthInterpreter, interpreter_action::FrameInit,
     },
-    primitives::{Address, U256, address},
+    primitives::{Bytes, U256},
+    state::EvmState,
 };
 
-pub const BASE_TOKEN_HOLDER_ADDRESS: Address = address!("0000000000000000000000000000000000010011");
+const HANDLE_FINALIZE_BASE_TOKEN_BRIDGING_ON_L2_SELECTOR: [u8; 4] = [0x03, 0x11, 0x7c, 0x8c];
 
 #[derive(Clone, Copy, Debug)]
 struct AtlasL1FeeFlow {
@@ -63,7 +65,10 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
 
     fn forced_fail_execution_result(&mut self, evm: &mut EVM) -> Result<FrameResult, ERROR>
     where
-        EVM: EvmTr<Context: ZkContextTr, Frame = FRAME>,
+        EVM: EvmTr<Frame = FRAME>,
+        EVM::Context: ZkContextTr + ContextSetters,
+        <EVM::Context as ContextTr>::Tx: Clone + SystemCallTx,
+        <EVM::Context as ContextTr>::Journal: JournalTr<State = EvmState>,
         ERROR: EvmTrError<EVM> + From<ZKsyncTxError> + FromStringError + IsTxError,
         FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
     {
@@ -194,6 +199,129 @@ impl<EVM, ERROR, FRAME> Default for ZKsyncHandler<EVM, ERROR, FRAME> {
     }
 }
 
+impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME>
+where
+    EVM: EvmTr<Frame = FRAME>,
+    EVM::Context: ZkContextTr + ContextSetters,
+    <EVM::Context as ContextTr>::Tx: Clone + SystemCallTx,
+    <EVM::Context as ContextTr>::Journal: JournalTr<State = EvmState>,
+    ERROR: EvmTrError<EVM> + From<ZKsyncTxError> + FromStringError + IsTxError,
+    FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
+{
+    fn notify_l1_asset_tracker(
+        &self,
+        evm: &mut EVM,
+        frame_result: &FrameResult,
+    ) -> Result<(), ERROR> {
+        if !evm.ctx().tx().is_l1_to_l2_tx() {
+            return Ok(());
+        }
+
+        let total_deposited = evm.ctx().tx().mint().unwrap_or_default();
+        if total_deposited.is_zero() {
+            return Ok(());
+        }
+
+        let settlement_layer_chain_id = evm
+            .ctx()
+            .tx()
+            .settlement_layer_chain_id()
+            .ok_or_else(|| ERROR::from_string("Missing settlement-layer chain id".into()))?;
+        let basefee = evm.ctx().block().basefee() as u128;
+        let spec_id = evm.ctx().cfg().spec();
+        let gas_price = U256::from(Self::effective_gas_price_for_spec(
+            evm.ctx().tx(),
+            basefee,
+            spec_id,
+        ));
+        let gas_limit = U256::from(evm.ctx().tx().gas_limit());
+        let max_fee_commitment = gas_price
+            .checked_mul(gas_limit)
+            .ok_or_else(|| ERROR::from_string("L1 max fee commitment overflow".into()))?;
+        let to_transfer = total_deposited
+            .checked_sub(max_fee_commitment)
+            .ok_or_else(|| {
+                ERROR::from_string(
+                    "Invalid L1 tx replay invariant: deposit smaller than max fee commitment"
+                        .into(),
+                )
+            })?;
+
+        let pay_to_operator = U256::from(frame_result.gas().used())
+            .checked_mul(gas_price)
+            .ok_or_else(|| ERROR::from_string("L1 operator fee overflow".into()))?;
+        let is_success = frame_result.interpreter_result().result.is_ok();
+        if is_success && !to_transfer.is_zero() {
+            self.execute_asset_tracker_call(evm, settlement_layer_chain_id, to_transfer)?;
+        }
+
+        if !pay_to_operator.is_zero() {
+            self.execute_asset_tracker_call(evm, settlement_layer_chain_id, pay_to_operator)?;
+        }
+
+        let refund = if is_success {
+            max_fee_commitment
+                .checked_sub(pay_to_operator)
+                .ok_or_else(|| {
+                    ERROR::from_string(
+                        "Invalid L1 tx replay invariant: operator fee exceeds prepaid fee".into(),
+                    )
+                })?
+        } else {
+            total_deposited
+                .checked_sub(pay_to_operator)
+                .ok_or_else(|| {
+                    ERROR::from_string(
+                        "Invalid L1 tx replay invariant: operator fee exceeds deposited amount"
+                            .into(),
+                    )
+                })?
+        };
+        if !refund.is_zero() {
+            self.execute_asset_tracker_call(evm, settlement_layer_chain_id, refund)?;
+        }
+
+        Ok(())
+    }
+
+    fn execute_asset_tracker_call(
+        &self,
+        evm: &mut EVM,
+        settlement_layer_chain_id: U256,
+        amount: U256,
+    ) -> Result<(), ERROR> {
+        let original_tx = evm.ctx().tx().clone();
+        let mut calldata = [0u8; 68];
+        calldata[..4].copy_from_slice(&HANDLE_FINALIZE_BASE_TOKEN_BRIDGING_ON_L2_SELECTOR);
+        calldata[4..36].copy_from_slice(&settlement_layer_chain_id.to_be_bytes::<32>());
+        calldata[36..68].copy_from_slice(&amount.to_be_bytes::<32>());
+
+        evm.ctx()
+            .set_tx(<EVM::Context as ContextTr>::Tx::new_system_tx_with_caller(
+                L2_BASE_TOKEN_ADDRESS,
+                L2_ASSET_TRACKER_ADDRESS,
+                Bytes::copy_from_slice(&calldata),
+            ));
+
+        let mut handler = Self::new();
+        let execution_result = handler.execution(evm, &InitialAndFloorGas::new(0, 0));
+        evm.ctx().set_tx(original_tx);
+        evm.ctx().local_mut().clear();
+        evm.frame_stack().clear();
+
+        let frame_result = execution_result?;
+        if frame_result.interpreter_result().result.is_ok() {
+            return Ok(());
+        }
+
+        // A revert here means token accounting is broken — treat as a fatal system error,
+        // matching ZKsync OS bootloader behavior which returns internal_error!() on revert.
+        Err(ERROR::from_string(
+            "L2AssetTracker.handleFinalizeBaseTokenBridgingOnL2 reverted during L1 replay".into(),
+        ))
+    }
+}
+
 /// Trait to check if the error is a transaction error.
 ///
 /// Used in cache_error handler to catch deposit transaction that was halted.
@@ -210,7 +338,10 @@ impl<DB, TX> IsTxError for EVMError<DB, TX> {
 
 impl<EVM, ERROR, FRAME> Handler for ZKsyncHandler<EVM, ERROR, FRAME>
 where
-    EVM: EvmTr<Context: ZkContextTr, Frame = FRAME>,
+    EVM: EvmTr<Frame = FRAME>,
+    EVM::Context: ZkContextTr + ContextSetters,
+    <EVM::Context as ContextTr>::Tx: Clone + SystemCallTx,
+    <EVM::Context as ContextTr>::Journal: JournalTr<State = EvmState>,
     ERROR: EvmTrError<EVM> + From<ZKsyncTxError> + FromStringError + IsTxError,
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
@@ -288,12 +419,18 @@ where
             // Reimburse sender and reward beneficiary using the rewritten Gas.
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
+            if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
+                self.notify_l1_asset_tracker(evm, exec_result)?;
+            }
         } else {
             // Vanilla path: keep default EVM accounting
             self.refund(evm, exec_result, eip7702_gas_refund);
             self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
+            if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
+                self.notify_l1_asset_tracker(evm, exec_result)?;
+            }
         }
 
         Ok(())
@@ -364,18 +501,18 @@ where
             }
         }
 
-        let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
-        let is_service_tx = tx.is_service_tx();
-
-        if !is_service_tx {
-            // validates account nonce and code
-            validate_account_nonce_and_code(
-                &caller_account.account().info,
-                tx.nonce(),
-                is_eip3607_disabled,
-                is_nonce_check_disabled,
-            )?;
+        if tx.is_service_tx() {
+            return Ok(());
         }
+
+        let mut caller_account = journal.load_account_with_code_mut(tx.caller())?.data;
+        // validates account nonce and code
+        validate_account_nonce_and_code(
+            &caller_account.account().info,
+            tx.nonce(),
+            is_eip3607_disabled,
+            is_nonce_check_disabled,
+        )?;
 
         let mut new_balance = *caller_account.balance();
         let max_balance_spending = tx.max_balance_spending()?;
@@ -395,7 +532,6 @@ where
 
         // subtracting max balance spending with value that is going to be deducted later in the call.
         let gas_balance_spending = effective_balance_spending - tx.value();
-
         new_balance = new_balance.saturating_sub(gas_balance_spending);
 
         // Touch account so we know it is changed.
@@ -403,7 +539,7 @@ where
         caller_account.set_balance(new_balance);
 
         // Bump the nonce for calls. Nonce for CREATE will be bumped in `handle_create`.
-        if tx.kind().is_call() && !is_service_tx {
+        if tx.kind().is_call() {
             caller_account.bump_nonce();
         }
 
@@ -501,7 +637,6 @@ where
                 }
             }
         };
-
         Ok(())
     }
 
@@ -561,6 +696,9 @@ where
             Frame = EthFrame<EthInterpreter>,
             Inspector: Inspector<<<Self as Handler>::Evm as EvmTr>::Context, EthInterpreter>,
         >,
+    EVM::Context: ContextSetters,
+    <EVM::Context as ContextTr>::Tx: Clone + SystemCallTx,
+    <EVM::Context as ContextTr>::Journal: JournalTr<State = EvmState>,
     ERROR: EvmTrError<EVM> + From<ZKsyncTxError> + FromStringError + IsTxError,
 {
     type IT = EthInterpreter;

@@ -13,6 +13,8 @@ use revm::{
     primitives::{Address, B256, Bytes, TxKind, U256},
 };
 
+const SERVICE_TRANSACTION_TYPE: u8 = 0x7d;
+
 /// ZKsync OS Transaction trait.
 #[auto_impl(&, &mut, Box, Arc)]
 pub trait ZkTxTr: Transaction {
@@ -25,12 +27,14 @@ pub trait ZkTxTr: Transaction {
 
     fn refund_recipient(&self) -> Option<Address>;
 
+    fn settlement_layer_chain_id(&self) -> Option<U256>;
+
     fn gas_used_override(&self) -> Option<u64>;
 
     fn force_fail(&self) -> bool;
 
     fn is_service_tx(&self) -> bool {
-        false
+        self.tx_type() == SERVICE_TRANSACTION_TYPE
     }
 }
 
@@ -194,6 +198,10 @@ impl<T: Transaction> ZkTxTr for ZKsyncTx<T> {
         self.l1_to_l2_part.refund_recipient
     }
 
+    fn settlement_layer_chain_id(&self) -> Option<U256> {
+        self.l1_to_l2_part.settlement_layer_chain_id
+    }
+
     fn gas_used_override(&self) -> Option<u64> {
         self.gas_used_override
     }
@@ -203,7 +211,7 @@ impl<T: Transaction> ZkTxTr for ZKsyncTx<T> {
     }
 
     fn is_service_tx(&self) -> bool {
-        self.service_tx
+        self.service_tx || self.tx_type() == SERVICE_TRANSACTION_TYPE
     }
 }
 
@@ -264,6 +272,12 @@ impl ZKsyncTxBuilder {
     /// Set the refund recipient of the L1 -> L2 part of the transaction.
     pub fn refund_recipient(mut self, refund_recipient: Option<Address>) -> Self {
         self.l1_to_l2_part.refund_recipient = refund_recipient;
+        self
+    }
+
+    /// Set the settlement-layer chain id of the L1 -> L2 part of the transaction.
+    pub fn settlement_layer_chain_id(mut self, settlement_layer_chain_id: Option<U256>) -> Self {
+        self.l1_to_l2_part.settlement_layer_chain_id = settlement_layer_chain_id;
         self
     }
 
@@ -382,5 +396,15 @@ mod tests {
         let roundtrip: ZKsyncTx<TxEnv> =
             serde_json::from_value(serialized).expect("deserialize roundtrip tx");
         assert!(roundtrip.service_tx);
+    }
+
+    #[test]
+    fn test_service_tx_type_implies_service_semantics_without_aux_flag() {
+        let tx = ZKsyncTx::builder()
+            .base(TxEnv::builder().tx_type(Some(SERVICE_TRANSACTION_TYPE)))
+            .build_fill();
+
+        assert!(!tx.service_tx);
+        assert!(tx.is_service_tx());
     }
 }
