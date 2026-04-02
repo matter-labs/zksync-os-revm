@@ -217,18 +217,26 @@ where
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
     /// Read L1 chain ID from L2AssetTracker storage (slot 154).
-    /// Returns U256::ZERO if the account is not present in state
-    /// (e.g., tests that don't deploy L2AssetTracker).
-    fn read_l1_chain_id(evm: &mut EVM) -> U256 {
+    fn read_l1_chain_id(evm: &mut EVM) -> Result<U256, ERROR> {
         let journal = evm.ctx().journal_mut();
-        // Load the account first so sload doesn't hit ColdLoadSkipped.
-        if journal.load_account(L2_ASSET_TRACKER_ADDRESS).is_err() {
-        //     return U256::ZERO;
-        }
+        // Load the account first so the storage read runs against a present journal entry.
         journal
-            .sload(L2_ASSET_TRACKER_ADDRESS, L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT)
-            .map(|v| v.data)
-            .unwrap_or(U256::ZERO)
+            .load_account(L2_ASSET_TRACKER_ADDRESS)
+            .map_err(|err| ERROR::from_string(format!("failed to load L2AssetTracker: {err:?}")))?;
+
+        let value = journal
+            .sload_skip_cold_load(
+                L2_ASSET_TRACKER_ADDRESS,
+                L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT,
+                false,
+            )
+            .map_err(|err| {
+                ERROR::from_string(format!(
+                    "failed to read L2AssetTracker.L1_CHAIN_ID: {err:?}"
+                ))
+            })?;
+
+        Ok(value.data)
     }
 
     fn notify_l2_asset_tracker(
@@ -245,7 +253,7 @@ where
             return Ok(());
         }
 
-        let l1_chain_id = Self::read_l1_chain_id(evm);
+        let l1_chain_id = Self::read_l1_chain_id(evm)?;
         let basefee = evm.ctx().block().basefee() as u128;
         let spec_id = evm.ctx().cfg().spec();
         let gas_price = U256::from(Self::effective_gas_price_for_spec(
@@ -515,7 +523,7 @@ where
                         self.pending_value_mint_checkpoint.set(Some(checkpoint));
 
                         let result = (|| -> Result<(), Self::Error> {
-                            let l1_chain_id = Self::read_l1_chain_id(evm);
+                            let l1_chain_id = Self::read_l1_chain_id(evm)?;
                             self.execute_asset_tracker_call(
                                 evm,
                                 l1_chain_id,
