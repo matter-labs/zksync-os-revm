@@ -1,4 +1,5 @@
 //!Handler related to ZKsync OS chain
+use core::cell::Cell;
 use std::boxed::Box;
 
 use crate::{
@@ -7,13 +8,12 @@ use crate::{
     spec::ZkSpecId,
     transaction::{ZKsyncTxError, ZkTxTr},
 };
-use revm::Database;
 use revm::{
     context::{LocalContextTr, result::InvalidTransaction},
     context_interface::{
         Block, Cfg, ContextSetters, ContextTr, JournalTr, Transaction,
         context::ContextError,
-        journaled_state::account::JournaledAccountTr,
+        journaled_state::{JournalCheckpoint, account::JournaledAccountTr},
         result::{EVMError, ExecutionResult, FromStringError, HaltReason},
         transaction::TransactionType,
     },
@@ -56,6 +56,9 @@ pub struct ZKsyncHandler<EVM, ERROR, FRAME> {
     pub mainnet: MainnetHandler<EVM, ERROR, FRAME>,
     /// Phantom data to avoid type inference issues.
     pub _phantom: core::marker::PhantomData<(EVM, ERROR, FRAME)>,
+    /// Provisional checkpoint for AtlasV3 upfront mint notification and transfer.
+    /// It is committed only if the main tx body succeeds.
+    pending_value_mint_checkpoint: Cell<Option<JournalCheckpoint>>,
 }
 
 impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
@@ -64,6 +67,7 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
         Self {
             mainnet: MainnetHandler::default(),
             _phantom: core::marker::PhantomData,
+            pending_value_mint_checkpoint: Cell::new(None),
         }
     }
 
@@ -213,17 +217,26 @@ where
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
     /// Read L1 chain ID from L2AssetTracker storage (slot 154).
-    /// Returns U256::ZERO if the account is not present in state
-    /// (e.g., tests that don't deploy L2AssetTracker).
-    fn read_l1_chain_id(evm: &mut EVM) -> U256 {
-        let (_, journal) = evm.ctx().tx_journal_mut();
-        match journal.db_mut().basic(L2_ASSET_TRACKER_ADDRESS) {
-            Ok(Some(_)) => journal
-                .db_mut()
-                .storage(L2_ASSET_TRACKER_ADDRESS, L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT)
-                .unwrap_or(U256::ZERO),
-            Ok(None) | Err(_) => U256::ZERO,
-        }
+    fn read_l1_chain_id(evm: &mut EVM) -> Result<U256, ERROR> {
+        let journal = evm.ctx().journal_mut();
+        // Load the account first so the storage read runs against a present journal entry.
+        journal
+            .load_account(L2_ASSET_TRACKER_ADDRESS)
+            .map_err(|err| ERROR::from_string(format!("failed to load L2AssetTracker: {err:?}")))?;
+
+        let value = journal
+            .sload_skip_cold_load(
+                L2_ASSET_TRACKER_ADDRESS,
+                L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT,
+                false,
+            )
+            .map_err(|err| {
+                ERROR::from_string(format!(
+                    "failed to read L2AssetTracker.L1_CHAIN_ID: {err:?}"
+                ))
+            })?;
+
+        Ok(value.data)
     }
 
     fn notify_l2_asset_tracker(
@@ -240,7 +253,7 @@ where
             return Ok(());
         }
 
-        let l1_chain_id = Self::read_l1_chain_id(evm);
+        let l1_chain_id = Self::read_l1_chain_id(evm)?;
         let basefee = evm.ctx().block().basefee() as u128;
         let spec_id = evm.ctx().cfg().spec();
         let gas_price = U256::from(Self::effective_gas_price_for_spec(
@@ -252,26 +265,10 @@ where
         let max_fee_commitment = gas_price
             .checked_mul(gas_limit)
             .ok_or_else(|| ERROR::from_string("L1 max fee commitment overflow".into()))?;
-        let to_transfer = total_deposited
-            .checked_sub(max_fee_commitment)
-            .ok_or_else(|| {
-                ERROR::from_string(
-                    "Invalid L1 tx replay invariant: deposit smaller than max fee commitment"
-                        .into(),
-                )
-            })?;
-
         let pay_to_operator = U256::from(frame_result.gas().used())
             .checked_mul(gas_price)
             .ok_or_else(|| ERROR::from_string("L1 operator fee overflow".into()))?;
         let is_success = frame_result.interpreter_result().result.is_ok();
-
-        // Value mint notification — only on success, and only if nonzero.
-        // On revert, the bootloader rolls back the value-mint notification
-        // inside its execution frame, so the REVM side should skip it too.
-        if is_success && !to_transfer.is_zero() {
-            self.execute_asset_tracker_call(evm, l1_chain_id, to_transfer)?;
-        }
 
         // Operator fee notification
         if !pay_to_operator.is_zero() {
@@ -423,6 +420,15 @@ where
         init_and_floor_gas: InitialAndFloorGas,
         eip7702_gas_refund: i64,
     ) -> Result<(), Self::Error> {
+        let is_success = exec_result.interpreter_result().result.is_ok();
+        if let Some(checkpoint) = self.pending_value_mint_checkpoint.take() {
+            if is_success {
+                evm.ctx().journal_mut().checkpoint_commit();
+            } else {
+                evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            }
+        }
+
         if let Some(gas_used_override) = evm.ctx().tx().gas_used_override() {
             let gas_limit = evm.ctx().tx().gas_limit();
             // Just in case use at most `gas_limit` gas to prevent the underflow
@@ -437,20 +443,20 @@ where
             //    self.refund(evm, exec_result, eip7702_gas_refund);  // <-- intentionally NOT called
 
             // Reimburse sender and reward beneficiary using the rewritten Gas.
-            self.reimburse_caller(evm, exec_result)?;
-            self.reward_beneficiary(evm, exec_result)?;
             if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
                 self.notify_l2_asset_tracker(evm, exec_result)?;
             }
+            self.reimburse_caller(evm, exec_result)?;
+            self.reward_beneficiary(evm, exec_result)?;
         } else {
             // Vanilla path: keep default EVM accounting
+            if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
+                self.notify_l2_asset_tracker(evm, exec_result)?;
+            }
             self.refund(evm, exec_result, eip7702_gas_refund);
             self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
-            if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
-                self.notify_l2_asset_tracker(evm, exec_result)?;
-            }
         }
 
         Ok(())
@@ -510,22 +516,34 @@ where
                     // 2) upfront transfer to caller (available during execution)
                     let fee_flow = Self::atlas_l1_fee_flow(tx, basefee, spec_id);
                     if fee_flow.upfront_transfer > U256::ZERO {
-                        // Notify asset tracker about value mint BEFORE the balance
-                        // transfer, matching the bootloader's mint_base_token order.
-                        let l1_chain_id = Self::read_l1_chain_id(evm);
-                        self.execute_asset_tracker_call(
-                            evm,
-                            l1_chain_id,
-                            fee_flow.upfront_transfer,
-                        )?;
+                        // Match zkOS semantics: the upfront asset-tracker notification and
+                        // treasury transfer form one atomic value-mint step. They must either
+                        // both persist or both roll back together.
+                        let checkpoint = journal.checkpoint();
+                        self.pending_value_mint_checkpoint.set(Some(checkpoint));
 
-                        let (tx, journal) = evm.ctx().tx_journal_mut();
-                        let _ = tx; // reborrow after execute_asset_tracker_call
-                        journal.transfer(
-                            BASE_TOKEN_HOLDER_ADDRESS,
-                            tx.caller(),
-                            fee_flow.upfront_transfer,
-                        )?;
+                        let result = (|| -> Result<(), Self::Error> {
+                            let l1_chain_id = Self::read_l1_chain_id(evm)?;
+                            self.execute_asset_tracker_call(
+                                evm,
+                                l1_chain_id,
+                                fee_flow.upfront_transfer,
+                            )?;
+
+                            let (tx, journal) = evm.ctx().tx_journal_mut();
+                            journal.transfer(
+                                BASE_TOKEN_HOLDER_ADDRESS,
+                                tx.caller(),
+                                fee_flow.upfront_transfer,
+                            )?;
+                            Ok(())
+                        })();
+
+                        if let Err(err) = result {
+                            self.pending_value_mint_checkpoint.set(None);
+                            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+                            return Err(err);
+                        }
                     }
                     return Ok(());
                 }
@@ -640,23 +658,10 @@ where
                 let is_success = frame_result.interpreter_result().result.is_ok();
                 let fee_flow = Self::atlas_l1_fee_flow(evm.ctx().tx(), basefee, spec_id);
 
-                if !is_success && fee_flow.upfront_transfer > U256::ZERO {
-                    // Upfront transfer happens outside EVM frame rollback in REVM.
-                    // Compensate it on revert to match bootloader behavior.
-                    evm.ctx().journal_mut().transfer(
-                        caller,
-                        refund_recipient,
-                        fee_flow.upfront_transfer,
-                    )?;
-                }
-
                 let refund_from_treasury = if is_success {
                     fee_flow.prepaid_fee.saturating_sub(spent_fee)
                 } else {
-                    fee_flow
-                        .mint
-                        .saturating_sub(spent_fee)
-                        .saturating_sub(fee_flow.upfront_transfer)
+                    fee_flow.mint.saturating_sub(spent_fee)
                 };
 
                 if refund_from_treasury > U256::ZERO {
