@@ -1,4 +1,5 @@
 //!Handler related to ZKsync OS chain
+use core::cell::Cell;
 use std::boxed::Box;
 
 use crate::{
@@ -12,7 +13,7 @@ use revm::{
     context_interface::{
         Block, Cfg, ContextSetters, ContextTr, JournalTr, Transaction,
         context::ContextError,
-        journaled_state::account::JournaledAccountTr,
+        journaled_state::{JournalCheckpoint, account::JournaledAccountTr},
         result::{EVMError, ExecutionResult, FromStringError, HaltReason},
         transaction::TransactionType,
     },
@@ -55,6 +56,9 @@ pub struct ZKsyncHandler<EVM, ERROR, FRAME> {
     pub mainnet: MainnetHandler<EVM, ERROR, FRAME>,
     /// Phantom data to avoid type inference issues.
     pub _phantom: core::marker::PhantomData<(EVM, ERROR, FRAME)>,
+    /// Provisional checkpoint for AtlasV3 upfront mint notification and transfer.
+    /// It is committed only if the main tx body succeeds.
+    pending_value_mint_checkpoint: Cell<Option<JournalCheckpoint>>,
 }
 
 impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
@@ -63,6 +67,7 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
         Self {
             mainnet: MainnetHandler::default(),
             _phantom: core::marker::PhantomData,
+            pending_value_mint_checkpoint: Cell::new(None),
         }
     }
 
@@ -407,6 +412,15 @@ where
         init_and_floor_gas: InitialAndFloorGas,
         eip7702_gas_refund: i64,
     ) -> Result<(), Self::Error> {
+        let is_success = exec_result.interpreter_result().result.is_ok();
+        if let Some(checkpoint) = self.pending_value_mint_checkpoint.take() {
+            if is_success {
+                evm.ctx().journal_mut().checkpoint_commit();
+            } else {
+                evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+            }
+        }
+
         if let Some(gas_used_override) = evm.ctx().tx().gas_used_override() {
             let gas_limit = evm.ctx().tx().gas_limit();
             // Just in case use at most `gas_limit` gas to prevent the underflow
@@ -494,22 +508,34 @@ where
                     // 2) upfront transfer to caller (available during execution)
                     let fee_flow = Self::atlas_l1_fee_flow(tx, basefee, spec_id);
                     if fee_flow.upfront_transfer > U256::ZERO {
-                        // Notify asset tracker about value mint BEFORE the balance
-                        // transfer, matching the bootloader's mint_base_token order.
-                        let l1_chain_id = Self::read_l1_chain_id(evm);
-                        self.execute_asset_tracker_call(
-                            evm,
-                            l1_chain_id,
-                            fee_flow.upfront_transfer,
-                        )?;
+                        // Match zkOS semantics: the upfront value mint and treasury transfer
+                        // are provisional until the main tx body succeeds.
+                        let checkpoint = journal.checkpoint();
+                        self.pending_value_mint_checkpoint.set(Some(checkpoint));
 
-                        let (tx, journal) = evm.ctx().tx_journal_mut();
-                        let _ = tx; // reborrow after execute_asset_tracker_call
-                        journal.transfer(
-                            BASE_TOKEN_HOLDER_ADDRESS,
-                            tx.caller(),
-                            fee_flow.upfront_transfer,
-                        )?;
+                        let result = (|| -> Result<(), Self::Error> {
+                            let l1_chain_id = Self::read_l1_chain_id(evm);
+                            self.execute_asset_tracker_call(
+                                evm,
+                                l1_chain_id,
+                                fee_flow.upfront_transfer,
+                            )?;
+
+                            let (tx, journal) = evm.ctx().tx_journal_mut();
+                            let _ = tx; // reborrow after execute_asset_tracker_call
+                            journal.transfer(
+                                BASE_TOKEN_HOLDER_ADDRESS,
+                                tx.caller(),
+                                fee_flow.upfront_transfer,
+                            )?;
+                            Ok(())
+                        })();
+
+                        if let Err(err) = result {
+                            self.pending_value_mint_checkpoint.set(None);
+                            evm.ctx().journal_mut().checkpoint_revert(checkpoint);
+                            return Err(err);
+                        }
                     }
                     return Ok(());
                 }
@@ -624,23 +650,10 @@ where
                 let is_success = frame_result.interpreter_result().result.is_ok();
                 let fee_flow = Self::atlas_l1_fee_flow(evm.ctx().tx(), basefee, spec_id);
 
-                if !is_success && fee_flow.upfront_transfer > U256::ZERO {
-                    // Upfront transfer happens outside EVM frame rollback in REVM.
-                    // Compensate it on revert to match bootloader behavior.
-                    evm.ctx().journal_mut().transfer(
-                        caller,
-                        refund_recipient,
-                        fee_flow.upfront_transfer,
-                    )?;
-                }
-
                 let refund_from_treasury = if is_success {
                     fee_flow.prepaid_fee.saturating_sub(spent_fee)
                 } else {
-                    fee_flow
-                        .mint
-                        .saturating_sub(spent_fee)
-                        .saturating_sub(fee_flow.upfront_transfer)
+                    fee_flow.mint.saturating_sub(spent_fee)
                 };
 
                 if refund_from_treasury > U256::ZERO {
