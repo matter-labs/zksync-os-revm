@@ -218,10 +218,7 @@ where
         match journal.db_mut().basic(L2_ASSET_TRACKER_ADDRESS) {
             Ok(Some(_)) => journal
                 .db_mut()
-                .storage(
-                    L2_ASSET_TRACKER_ADDRESS,
-                    L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT,
-                )
+                .storage(L2_ASSET_TRACKER_ADDRESS, L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT)
                 .unwrap_or(U256::ZERO),
             Ok(None) | Err(_) => U256::ZERO,
         }
@@ -230,7 +227,7 @@ where
     /// Post-execution asset tracker notifications for operator fee and refund.
     /// The value-mint notification is handled separately in
     /// `validate_against_state_and_deduct_caller` so it rolls back with the tx body.
-    fn notify_l1_asset_tracker_post_execution(
+    fn notify_l2_asset_tracker_post_execution(
         &self,
         evm: &mut EVM,
         frame_result: &FrameResult,
@@ -245,6 +242,11 @@ where
         }
 
         let l1_chain_id = Self::read_l1_chain_id(evm);
+        // If L1 chain ID is zero, L2AssetTracker is not deployed/initialized — skip notifications.
+        if l1_chain_id.is_zero() {
+            return Ok(());
+        }
+
         let gas_price = U256::from(evm.ctx().tx().gas_price());
         let gas_limit = U256::from(evm.ctx().tx().gas_limit());
         let max_fee_commitment = gas_price
@@ -420,14 +422,14 @@ where
             // Reimburse sender and reward beneficiary using the rewritten Gas.
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
-            self.notify_l1_asset_tracker_post_execution(evm, exec_result)?;
+            self.notify_l2_asset_tracker_post_execution(evm, exec_result)?;
         } else {
             // Vanilla path: keep default EVM accounting
             self.refund(evm, exec_result, eip7702_gas_refund);
             self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
-            self.notify_l1_asset_tracker_post_execution(evm, exec_result)?;
+            self.notify_l2_asset_tracker_post_execution(evm, exec_result)?;
         }
 
         Ok(())
@@ -489,13 +491,16 @@ where
 
                     // Notify asset tracker about value mint BEFORE the balance
                     // transfer, matching the bootloader's mint_base_token order.
+                    // Skip if L1 chain ID is zero (L2AssetTracker not deployed).
                     if fee_flow.upfront_transfer > U256::ZERO {
                         let l1_chain_id = Self::read_l1_chain_id(evm);
-                        self.execute_asset_tracker_call(
-                            evm,
-                            l1_chain_id,
-                            fee_flow.upfront_transfer,
-                        )?;
+                        if !l1_chain_id.is_zero() {
+                            self.execute_asset_tracker_call(
+                                evm,
+                                l1_chain_id,
+                                fee_flow.upfront_transfer,
+                            )?;
+                        }
 
                         let (tx, journal) = evm.ctx().tx_journal_mut();
                         let _ = tx; // reborrow after execute_asset_tracker_call
