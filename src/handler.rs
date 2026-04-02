@@ -7,7 +7,6 @@ use crate::{
     spec::ZkSpecId,
     transaction::{ZKsyncTxError, ZkTxTr},
 };
-use revm::Database;
 use revm::{
     context::{LocalContextTr, result::InvalidTransaction},
     context_interface::{
@@ -216,14 +215,15 @@ where
     /// Returns U256::ZERO if the account is not present in state
     /// (e.g., tests that don't deploy L2AssetTracker).
     fn read_l1_chain_id(evm: &mut EVM) -> U256 {
-        let (_, journal) = evm.ctx().tx_journal_mut();
-        match journal.db_mut().basic(L2_ASSET_TRACKER_ADDRESS) {
-            Ok(Some(_)) => journal
-                .db_mut()
-                .storage(L2_ASSET_TRACKER_ADDRESS, L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT)
-                .unwrap_or(U256::ZERO),
-            Ok(None) | Err(_) => U256::ZERO,
+        let journal = evm.ctx().journal_mut();
+        // Load the account first so sload doesn't hit ColdLoadSkipped.
+        if journal.load_account(L2_ASSET_TRACKER_ADDRESS).is_err() {
+            return U256::ZERO;
         }
+        journal
+            .sload(L2_ASSET_TRACKER_ADDRESS, L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT)
+            .map(|v| v.data)
+            .unwrap_or(U256::ZERO)
     }
 
     fn notify_l2_asset_tracker(
@@ -437,20 +437,20 @@ where
             //    self.refund(evm, exec_result, eip7702_gas_refund);  // <-- intentionally NOT called
 
             // Reimburse sender and reward beneficiary using the rewritten Gas.
-            self.reimburse_caller(evm, exec_result)?;
-            self.reward_beneficiary(evm, exec_result)?;
             if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
                 self.notify_l2_asset_tracker(evm, exec_result)?;
             }
+            self.reimburse_caller(evm, exec_result)?;
+            self.reward_beneficiary(evm, exec_result)?;
         } else {
             // Vanilla path: keep default EVM accounting
+            if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
+                self.notify_l2_asset_tracker(evm, exec_result)?;
+            }
             self.refund(evm, exec_result, eip7702_gas_refund);
             self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
-            if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
-                self.notify_l2_asset_tracker(evm, exec_result)?;
-            }
         }
 
         Ok(())
