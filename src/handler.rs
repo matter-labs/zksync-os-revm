@@ -523,7 +523,6 @@ where
                             )?;
 
                             let (tx, journal) = evm.ctx().tx_journal_mut();
-                            let _ = tx; // reborrow after execute_asset_tracker_call
                             journal.transfer(
                                 BASE_TOKEN_HOLDER_ADDRESS,
                                 tx.caller(),
