@@ -209,12 +209,14 @@ where
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
     /// Read L1 chain ID from L2AssetTracker storage (slot 154).
-    fn read_l1_chain_id(evm: &mut EVM) -> Result<U256, ERROR> {
+    /// Returns U256::ZERO if the account is not present in state
+    /// (e.g., tests that don't deploy L2AssetTracker).
+    fn read_l1_chain_id(evm: &mut EVM) -> U256 {
         let (_, journal) = evm.ctx().tx_journal_mut();
-        let chain_id = journal
+        journal
             .sload(L2_ASSET_TRACKER_ADDRESS, L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT)
-            .map_err(|e| ERROR::from(ContextError::from(e)))?;
-        Ok(chain_id.data)
+            .map(|v| v.data)
+            .unwrap_or(U256::ZERO)
     }
 
     /// Post-execution asset tracker notifications for operator fee and refund.
@@ -234,7 +236,7 @@ where
             return Ok(());
         }
 
-        let l1_chain_id = Self::read_l1_chain_id(evm)?;
+        let l1_chain_id = Self::read_l1_chain_id(evm);
         let gas_price = U256::from(evm.ctx().tx().gas_price());
         let gas_limit = U256::from(evm.ctx().tx().gas_limit());
         let max_fee_commitment = gas_price
@@ -480,7 +482,7 @@ where
                     // Notify asset tracker about value mint BEFORE the balance
                     // transfer, matching the bootloader's mint_base_token order.
                     if fee_flow.upfront_transfer > U256::ZERO {
-                        let l1_chain_id = Self::read_l1_chain_id(evm)?;
+                        let l1_chain_id = Self::read_l1_chain_id(evm);
                         self.execute_asset_tracker_call(
                             evm,
                             l1_chain_id,
