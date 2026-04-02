@@ -242,11 +242,6 @@ where
         }
 
         let l1_chain_id = Self::read_l1_chain_id(evm);
-        // If L1 chain ID is zero, L2AssetTracker is not deployed/initialized — skip notifications.
-        if l1_chain_id.is_zero() {
-            return Ok(());
-        }
-
         let gas_price = U256::from(evm.ctx().tx().gas_price());
         let gas_limit = U256::from(evm.ctx().tx().gas_limit());
         let max_fee_commitment = gas_price
@@ -491,16 +486,13 @@ where
 
                     // Notify asset tracker about value mint BEFORE the balance
                     // transfer, matching the bootloader's mint_base_token order.
-                    // Skip if L1 chain ID is zero (L2AssetTracker not deployed).
                     if fee_flow.upfront_transfer > U256::ZERO {
                         let l1_chain_id = Self::read_l1_chain_id(evm);
-                        if !l1_chain_id.is_zero() {
-                            self.execute_asset_tracker_call(
-                                evm,
-                                l1_chain_id,
-                                fee_flow.upfront_transfer,
-                            )?;
-                        }
+                        self.execute_asset_tracker_call(
+                            evm,
+                            l1_chain_id,
+                            fee_flow.upfront_transfer,
+                        )?;
 
                         let (tx, journal) = evm.ctx().tx_journal_mut();
                         let _ = tx; // reborrow after execute_asset_tracker_call
