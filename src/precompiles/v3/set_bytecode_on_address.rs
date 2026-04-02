@@ -1,6 +1,8 @@
 use crate::precompiles::calldata_view::CalldataView;
 use crate::precompiles::utils::{oog_error, revert};
-use crate::precompiles::v3::common::{CONTRACT_DEPLOYER_ADDRESS, zksync_os_hook_input_check};
+use crate::precompiles::v3::common::{
+    COMPLEX_UPGRADER_ADDRESS, CONTRACT_DEPLOYER_ADDRESS, zksync_os_hook_input_check,
+};
 use crate::precompiles::v3::deployer::MAX_CODE_SIZE;
 use crate::precompiles::v3::gas_cost::set_bytecode_details_extra_gas;
 use revm::Database;
@@ -30,7 +32,7 @@ pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr>(
     let call_value = inputs.value.get();
     let gas = Gas::new(inputs.gas_limit);
 
-    let allowed_callers = [CONTRACT_DEPLOYER_ADDRESS];
+    let allowed_callers = [CONTRACT_DEPLOYER_ADDRESS, COMPLEX_UPGRADER_ADDRESS];
     if let Some(early_return) = zksync_os_hook_input_check(
         inputs,
         &caller,

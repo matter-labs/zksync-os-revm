@@ -3,6 +3,7 @@ use std::boxed::Box;
 
 use crate::{
     api::exec::ZkContextTr,
+    constants::{BASE_TOKEN_HOLDER_ADDRESS, L2_ASSET_TRACKER_ADDRESS, L2_BASE_TOKEN_ADDRESS},
     spec::ZkSpecId,
     transaction::{ZKsyncTxError, ZkTxTr},
 };
@@ -25,13 +26,10 @@ use revm::{
         CallOutcome, Gas, InitialAndFloorGas, InstructionResult, InterpreterResult,
         interpreter::EthInterpreter, interpreter_action::FrameInit,
     },
-    primitives::{Address, Bytes, U256, address},
+    primitives::{Bytes, U256},
     state::EvmState,
 };
 
-const L2_BASE_TOKEN_ADDRESS: Address = address!("000000000000000000000000000000000000800a");
-const L2_ASSET_TRACKER_ADDRESS: Address = address!("000000000000000000000000000000000001000f");
-const BASE_TOKEN_HOLDER_ADDRESS: Address = address!("0000000000000000000000000000000000010011");
 const HANDLE_FINALIZE_BASE_TOKEN_BRIDGING_ON_L2_SELECTOR: [u8; 4] = [0x03, 0x11, 0x7c, 0x8c];
 /// L2AssetTracker storage slot for `uint256 public L1_CHAIN_ID`.
 /// Verified via `forge inspect L2AssetTracker storage-layout`.
@@ -113,11 +111,16 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
     }
 
     #[inline]
-    fn effective_gas_price_for_spec<TX: Transaction>(
+    fn effective_gas_price_for_spec<TX: ZkTxTr>(
         tx: &TX,
         base_fee: u128,
         spec_id: ZkSpecId,
     ) -> u128 {
+        // L1->L2 transactions use their own gas_price set on L1,
+        // independent of the L2 block base_fee.
+        if tx.is_l1_to_l2_tx() {
+            return tx.effective_gas_price(base_fee);
+        }
         if ZkSpecId::AtlasV3.is_enabled_in(spec_id) && base_fee == 0 {
             0
         } else {
@@ -126,7 +129,7 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
     }
 
     #[inline]
-    fn effective_balance_spending_for_spec<TX: Transaction>(
+    fn effective_balance_spending_for_spec<TX: ZkTxTr>(
         tx: &TX,
         base_fee: u128,
         blob_price: u128,
@@ -214,7 +217,6 @@ where
     /// (e.g., tests that don't deploy L2AssetTracker).
     fn read_l1_chain_id(evm: &mut EVM) -> U256 {
         let (_, journal) = evm.ctx().tx_journal_mut();
-
         match journal.db_mut().basic(L2_ASSET_TRACKER_ADDRESS) {
             Ok(Some(_)) => journal
                 .db_mut()
@@ -224,10 +226,7 @@ where
         }
     }
 
-    /// Post-execution asset tracker notifications for operator fee and refund.
-    /// The value-mint notification is handled separately in
-    /// `validate_against_state_and_deduct_caller` so it rolls back with the tx body.
-    fn notify_l2_asset_tracker_post_execution(
+    fn notify_l2_asset_tracker(
         &self,
         evm: &mut EVM,
         frame_result: &FrameResult,
@@ -242,16 +241,37 @@ where
         }
 
         let l1_chain_id = Self::read_l1_chain_id(evm);
-        let gas_price = U256::from(evm.ctx().tx().gas_price());
+        let basefee = evm.ctx().block().basefee() as u128;
+        let spec_id = evm.ctx().cfg().spec();
+        let gas_price = U256::from(Self::effective_gas_price_for_spec(
+            evm.ctx().tx(),
+            basefee,
+            spec_id,
+        ));
         let gas_limit = U256::from(evm.ctx().tx().gas_limit());
         let max_fee_commitment = gas_price
             .checked_mul(gas_limit)
             .ok_or_else(|| ERROR::from_string("L1 max fee commitment overflow".into()))?;
+        let to_transfer = total_deposited
+            .checked_sub(max_fee_commitment)
+            .ok_or_else(|| {
+                ERROR::from_string(
+                    "Invalid L1 tx replay invariant: deposit smaller than max fee commitment"
+                        .into(),
+                )
+            })?;
 
         let pay_to_operator = U256::from(frame_result.gas().used())
             .checked_mul(gas_price)
             .ok_or_else(|| ERROR::from_string("L1 operator fee overflow".into()))?;
         let is_success = frame_result.interpreter_result().result.is_ok();
+
+        // Value mint notification — only on success, and only if nonzero.
+        // On revert, the bootloader rolls back the value-mint notification
+        // inside its execution frame, so the REVM side should skip it too.
+        if is_success && !to_transfer.is_zero() {
+            self.execute_asset_tracker_call(evm, l1_chain_id, to_transfer)?;
+        }
 
         // Operator fee notification
         if !pay_to_operator.is_zero() {
@@ -314,6 +334,8 @@ where
             return Ok(());
         }
 
+        // A revert here means token accounting is broken — treat as a fatal system error,
+        // matching ZKsync OS bootloader behavior which returns internal_error!() on revert.
         Err(ERROR::from_string(
             "L2AssetTracker.handleFinalizeBaseTokenBridgingOnL2 reverted during L1 replay".into(),
         ))
@@ -417,14 +439,18 @@ where
             // Reimburse sender and reward beneficiary using the rewritten Gas.
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
-            self.notify_l2_asset_tracker_post_execution(evm, exec_result)?;
+            if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
+                self.notify_l2_asset_tracker(evm, exec_result)?;
+            }
         } else {
             // Vanilla path: keep default EVM accounting
             self.refund(evm, exec_result, eip7702_gas_refund);
             self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
-            self.notify_l2_asset_tracker_post_execution(evm, exec_result)?;
+            if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
+                self.notify_l2_asset_tracker(evm, exec_result)?;
+            }
         }
 
         Ok(())
@@ -483,10 +509,9 @@ where
                     // 1) max fee commitment (kept in treasury until post-execution)
                     // 2) upfront transfer to caller (available during execution)
                     let fee_flow = Self::atlas_l1_fee_flow(tx, basefee, spec_id);
-
-                    // Notify asset tracker about value mint BEFORE the balance
-                    // transfer, matching the bootloader's mint_base_token order.
                     if fee_flow.upfront_transfer > U256::ZERO {
+                        // Notify asset tracker about value mint BEFORE the balance
+                        // transfer, matching the bootloader's mint_base_token order.
                         let l1_chain_id = Self::read_l1_chain_id(evm);
                         self.execute_asset_tracker_call(
                             evm,

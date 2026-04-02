@@ -169,11 +169,15 @@ where
 
     #[inline]
     fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
-        // Warm Blake2 (0x09) and Point Evaluation (0x0a) addresses even though
-        // they are not active precompiles.
-        let extra = [u64_to_address(9), u64_to_address(10)].into_iter();
-
         let spec = self.spec;
+        // Historical versions warmed Blake2 (0x09) and Point Evaluation (0x0a)
+        // even though they are not active precompiles.
+        let extra = match spec {
+            ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => {
+                vec![u64_to_address(9), u64_to_address(10)]
+            }
+            ZkSpecId::AtlasV3 => vec![],
+        };
         Box::new(
             self.inner
                 .warm_addresses()
