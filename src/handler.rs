@@ -223,7 +223,7 @@ where
         let journal = evm.ctx().journal_mut();
         // Load the account first so sload doesn't hit ColdLoadSkipped.
         if journal.load_account(L2_ASSET_TRACKER_ADDRESS).is_err() {
-            return U256::ZERO;
+        //     return U256::ZERO;
         }
         journal
             .sload(L2_ASSET_TRACKER_ADDRESS, L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT)
