@@ -7,6 +7,7 @@ use crate::{
     spec::ZkSpecId,
     transaction::{ZKsyncTxError, ZkTxTr},
 };
+use revm::Database;
 use revm::{
     context::{LocalContextTr, result::InvalidTransaction},
     context_interface::{
@@ -30,6 +31,9 @@ use revm::{
 };
 
 const HANDLE_FINALIZE_BASE_TOKEN_BRIDGING_ON_L2_SELECTOR: [u8; 4] = [0x03, 0x11, 0x7c, 0x8c];
+/// L2AssetTracker storage slot for `uint256 public L1_CHAIN_ID`.
+/// Verified via `forge inspect L2AssetTracker storage-layout`.
+const L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT: U256 = U256::from_limbs([154, 0, 0, 0]);
 
 #[derive(Clone, Copy, Debug)]
 struct AtlasL1FeeFlow {
@@ -208,7 +212,21 @@ where
     ERROR: EvmTrError<EVM> + From<ZKsyncTxError> + FromStringError + IsTxError,
     FRAME: FrameTr<FrameResult = FrameResult, FrameInit = FrameInit>,
 {
-    fn notify_l1_asset_tracker(
+    /// Read L1 chain ID from L2AssetTracker storage (slot 154).
+    /// Returns U256::ZERO if the account is not present in state
+    /// (e.g., tests that don't deploy L2AssetTracker).
+    fn read_l1_chain_id(evm: &mut EVM) -> U256 {
+        let (_, journal) = evm.ctx().tx_journal_mut();
+        match journal.db_mut().basic(L2_ASSET_TRACKER_ADDRESS) {
+            Ok(Some(_)) => journal
+                .db_mut()
+                .storage(L2_ASSET_TRACKER_ADDRESS, L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT)
+                .unwrap_or(U256::ZERO),
+            Ok(None) | Err(_) => U256::ZERO,
+        }
+    }
+
+    fn notify_l2_asset_tracker(
         &self,
         evm: &mut EVM,
         frame_result: &FrameResult,
@@ -222,11 +240,7 @@ where
             return Ok(());
         }
 
-        let settlement_layer_chain_id = evm
-            .ctx()
-            .tx()
-            .settlement_layer_chain_id()
-            .ok_or_else(|| ERROR::from_string("Missing settlement-layer chain id".into()))?;
+        let l1_chain_id = Self::read_l1_chain_id(evm);
         let basefee = evm.ctx().block().basefee() as u128;
         let spec_id = evm.ctx().cfg().spec();
         let gas_price = U256::from(Self::effective_gas_price_for_spec(
@@ -251,14 +265,20 @@ where
             .checked_mul(gas_price)
             .ok_or_else(|| ERROR::from_string("L1 operator fee overflow".into()))?;
         let is_success = frame_result.interpreter_result().result.is_ok();
+
+        // Value mint notification — only on success, and only if nonzero.
+        // On revert, the bootloader rolls back the value-mint notification
+        // inside its execution frame, so the REVM side should skip it too.
         if is_success && !to_transfer.is_zero() {
-            self.execute_asset_tracker_call(evm, settlement_layer_chain_id, to_transfer)?;
+            self.execute_asset_tracker_call(evm, l1_chain_id, to_transfer)?;
         }
 
+        // Operator fee notification
         if !pay_to_operator.is_zero() {
-            self.execute_asset_tracker_call(evm, settlement_layer_chain_id, pay_to_operator)?;
+            self.execute_asset_tracker_call(evm, l1_chain_id, pay_to_operator)?;
         }
 
+        // Refund notification
         let refund = if is_success {
             max_fee_commitment
                 .checked_sub(pay_to_operator)
@@ -278,7 +298,7 @@ where
                 })?
         };
         if !refund.is_zero() {
-            self.execute_asset_tracker_call(evm, settlement_layer_chain_id, refund)?;
+            self.execute_asset_tracker_call(evm, l1_chain_id, refund)?;
         }
 
         Ok(())
@@ -287,13 +307,13 @@ where
     fn execute_asset_tracker_call(
         &self,
         evm: &mut EVM,
-        settlement_layer_chain_id: U256,
+        l1_chain_id: U256,
         amount: U256,
     ) -> Result<(), ERROR> {
         let original_tx = evm.ctx().tx().clone();
         let mut calldata = [0u8; 68];
         calldata[..4].copy_from_slice(&HANDLE_FINALIZE_BASE_TOKEN_BRIDGING_ON_L2_SELECTOR);
-        calldata[4..36].copy_from_slice(&settlement_layer_chain_id.to_be_bytes::<32>());
+        calldata[4..36].copy_from_slice(&l1_chain_id.to_be_bytes::<32>());
         calldata[36..68].copy_from_slice(&amount.to_be_bytes::<32>());
 
         evm.ctx()
@@ -420,7 +440,7 @@ where
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
             if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
-                self.notify_l1_asset_tracker(evm, exec_result)?;
+                self.notify_l2_asset_tracker(evm, exec_result)?;
             }
         } else {
             // Vanilla path: keep default EVM accounting
@@ -429,7 +449,7 @@ where
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
             if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
-                self.notify_l1_asset_tracker(evm, exec_result)?;
+                self.notify_l2_asset_tracker(evm, exec_result)?;
             }
         }
 
@@ -490,6 +510,17 @@ where
                     // 2) upfront transfer to caller (available during execution)
                     let fee_flow = Self::atlas_l1_fee_flow(tx, basefee, spec_id);
                     if fee_flow.upfront_transfer > U256::ZERO {
+                        // Notify asset tracker about value mint BEFORE the balance
+                        // transfer, matching the bootloader's mint_base_token order.
+                        let l1_chain_id = Self::read_l1_chain_id(evm);
+                        self.execute_asset_tracker_call(
+                            evm,
+                            l1_chain_id,
+                            fee_flow.upfront_transfer,
+                        )?;
+
+                        let (tx, journal) = evm.ctx().tx_journal_mut();
+                        let _ = tx; // reborrow after execute_asset_tracker_call
                         journal.transfer(
                             BASE_TOKEN_HOLDER_ADDRESS,
                             tx.caller(),
