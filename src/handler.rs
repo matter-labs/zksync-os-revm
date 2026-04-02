@@ -252,26 +252,10 @@ where
         let max_fee_commitment = gas_price
             .checked_mul(gas_limit)
             .ok_or_else(|| ERROR::from_string("L1 max fee commitment overflow".into()))?;
-        let to_transfer = total_deposited
-            .checked_sub(max_fee_commitment)
-            .ok_or_else(|| {
-                ERROR::from_string(
-                    "Invalid L1 tx replay invariant: deposit smaller than max fee commitment"
-                        .into(),
-                )
-            })?;
-
         let pay_to_operator = U256::from(frame_result.gas().used())
             .checked_mul(gas_price)
             .ok_or_else(|| ERROR::from_string("L1 operator fee overflow".into()))?;
         let is_success = frame_result.interpreter_result().result.is_ok();
-
-        // Value mint notification — only on success, and only if nonzero.
-        // On revert, the bootloader rolls back the value-mint notification
-        // inside its execution frame, so the REVM side should skip it too.
-        if is_success && !to_transfer.is_zero() {
-            self.execute_asset_tracker_call(evm, l1_chain_id, to_transfer)?;
-        }
 
         // Operator fee notification
         if !pay_to_operator.is_zero() {
