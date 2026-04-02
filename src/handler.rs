@@ -508,8 +508,9 @@ where
                     // 2) upfront transfer to caller (available during execution)
                     let fee_flow = Self::atlas_l1_fee_flow(tx, basefee, spec_id);
                     if fee_flow.upfront_transfer > U256::ZERO {
-                        // Match zkOS semantics: the upfront value mint and treasury transfer
-                        // are provisional until the main tx body succeeds.
+                        // Match zkOS semantics: the upfront asset-tracker notification and
+                        // treasury transfer form one atomic value-mint step. They must either
+                        // both persist or both roll back together.
                         let checkpoint = journal.checkpoint();
                         self.pending_value_mint_checkpoint.set(Some(checkpoint));
 
