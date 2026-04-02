@@ -6,6 +6,7 @@ use crate::{
     spec::ZkSpecId,
     transaction::{ZKsyncTxError, ZkTxTr},
 };
+use revm::Database;
 use revm::{
     context::{LocalContextTr, result::InvalidTransaction},
     context_interface::{
@@ -213,10 +214,17 @@ where
     /// (e.g., tests that don't deploy L2AssetTracker).
     fn read_l1_chain_id(evm: &mut EVM) -> U256 {
         let (_, journal) = evm.ctx().tx_journal_mut();
-        journal
-            .sload(L2_ASSET_TRACKER_ADDRESS, L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT)
-            .map(|v| v.data)
-            .unwrap_or(U256::ZERO)
+
+        match journal.db_mut().basic(L2_ASSET_TRACKER_ADDRESS) {
+            Ok(Some(_)) => journal
+                .db_mut()
+                .storage(
+                    L2_ASSET_TRACKER_ADDRESS,
+                    L2_ASSET_TRACKER_L1_CHAIN_ID_SLOT,
+                )
+                .unwrap_or(U256::ZERO),
+            Ok(None) | Err(_) => U256::ZERO,
+        }
     }
 
     /// Post-execution asset tracker notifications for operator fee and refund.
