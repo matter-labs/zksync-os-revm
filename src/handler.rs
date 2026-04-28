@@ -11,7 +11,7 @@ use revm::{
         Block, Cfg, ContextTr, JournalTr, Transaction,
         context::ContextError,
         journaled_state::account::JournaledAccountTr,
-        result::{EVMError, ExecutionResult, FromStringError, HaltReason},
+        result::{EVMError, ExecutionResult, FromStringError, HaltReason, ResultGas},
     },
     handler::{
         EthFrame, EvmTr, FrameResult, Handler, MainnetHandler,
@@ -97,7 +97,7 @@ where
         exec_result: &mut FrameResult,
         init_and_floor_gas: InitialAndFloorGas,
         eip7702_gas_refund: i64,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<ResultGas, Self::Error> {
         if let Some(gas_used_override) = evm.ctx().tx().gas_used_override() {
             let gas_limit = evm.ctx().tx().gas_limit();
             // Just in case use at most `gas_limit` gas to prevent the underflow
@@ -111,23 +111,29 @@ where
             // IMPORTANT: ignore EVM-native refunds: (do NOT call `gas.record_refund(...)` here)
             //    self.refund(evm, exec_result, eip7702_gas_refund);  // <-- intentionally NOT called
 
+            let result_gas =
+                post_execution::build_result_gas(exec_result.gas(), init_and_floor_gas);
+
             // Reimburse sender and reward beneficiary using the rewritten Gas.
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
+            Ok(result_gas)
         } else {
             // Vanilla path: keep default EVM accounting
             self.refund(evm, exec_result, eip7702_gas_refund);
+            let result_gas =
+                post_execution::build_result_gas(exec_result.gas(), init_and_floor_gas);
             self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
+            Ok(result_gas)
         }
-
-        Ok(())
     }
 
     fn validate_against_state_and_deduct_caller(
         &self,
         evm: &mut Self::Evm,
+        _init_and_floor_gas: &mut InitialAndFloorGas,
     ) -> Result<(), Self::Error> {
         let ctx = evm.ctx();
 
@@ -213,7 +219,11 @@ where
 
         let basefee = evm.ctx().block().basefee() as u128;
         let effective_gas_price = evm.ctx().tx().effective_gas_price(basefee);
-        let spent_fee = U256::from(frame_result.gas().used()) * U256::from(effective_gas_price);
+        let gas_used = frame_result
+            .gas()
+            .used()
+            .saturating_sub(frame_result.gas().reservoir());
+        let spent_fee = U256::from(gas_used) * U256::from(effective_gas_price);
         let mint = evm.ctx().tx().mint().unwrap_or_default();
         let value = evm.ctx().tx().value();
 
@@ -243,11 +253,15 @@ where
         let beneficiary = evm.ctx().block().beneficiary();
         let basefee = evm.ctx().block().basefee() as u128;
         let effective_gas_price = evm.ctx().tx().effective_gas_price(basefee);
+        let gas_used = frame_result
+            .gas()
+            .used()
+            .saturating_sub(frame_result.gas().reservoir());
 
         // reward beneficiary
         evm.ctx().journal_mut().balance_incr(
             beneficiary,
-            U256::from(effective_gas_price * frame_result.gas().used() as u128),
+            U256::from(effective_gas_price * gas_used as u128),
         )?;
 
         Ok(())
@@ -257,6 +271,7 @@ where
         &mut self,
         evm: &mut Self::Evm,
         frame_result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        result_gas: ResultGas,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         match core::mem::replace(evm.ctx().error(), Ok(())) {
             Err(ContextError::Db(e)) => return Err(e.into()),
@@ -264,7 +279,7 @@ where
             Ok(_) => (),
         }
 
-        let exec_result = post_execution::output(evm.ctx(), frame_result);
+        let exec_result = post_execution::output(evm.ctx(), frame_result, result_gas);
 
         evm.ctx().journal_mut().commit_tx();
         evm.ctx().local_mut().clear();
@@ -277,8 +292,8 @@ where
         &mut self,
         evm: &mut Self::Evm,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
-        let init_and_floor_gas = self.validate(evm)?;
-        let eip7702_refund = self.pre_execution(evm)? as i64;
+        let mut init_and_floor_gas = self.validate(evm)?;
+        let eip7702_refund = self.pre_execution(evm, &mut init_and_floor_gas)? as i64;
 
         // === forced-fail short-circuit ===
         let mut exec_result = if evm.ctx().tx().force_fail() {
@@ -323,8 +338,9 @@ where
             self.execution(evm, &init_and_floor_gas)?
         };
 
-        self.post_execution(evm, &mut exec_result, init_and_floor_gas, eip7702_refund)?;
-        self.execution_result(evm, exec_result)
+        let result_gas =
+            self.post_execution(evm, &mut exec_result, init_and_floor_gas, eip7702_refund)?;
+        self.execution_result(evm, exec_result, result_gas)
     }
 }
 
