@@ -261,7 +261,7 @@ where
         // reward beneficiary
         evm.ctx().journal_mut().balance_incr(
             beneficiary,
-            U256::from(effective_gas_price * gas_used as u128),
+            U256::from(gas_used) * U256::from(effective_gas_price),
         )?;
 
         Ok(())
