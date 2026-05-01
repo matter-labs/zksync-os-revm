@@ -38,7 +38,7 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
         return revert(gas);
     }
 
-    if !gas.record_cost(1) {
+    if !gas.record_regular_cost(1) {
         return oog_error();
     }
 

@@ -82,7 +82,7 @@ pub(crate) fn send_to_l1_inner<CTX: ContextTr>(
     // Charge gas for emitting l1 message and log
     let gas_cost =
         l1_message_gas_cost(message.len()) + log_gas_cost(3, abi_encoded_message_len as u64);
-    if !gas.record_cost(gas_cost) {
+    if !gas.record_regular_cost(gas_cost) {
         // Out-of-gas error
         return Err(InterpreterResult::new(
             InstructionResult::OutOfGas,
@@ -128,7 +128,7 @@ pub fn l1_messenger_precompile_call<CTX: ContextTr>(
     }
 
     // Charge base cost for calling system hook
-    if !gas.record_cost(HOOK_BASE_GAS_COST) {
+    if !gas.record_regular_cost(HOOK_BASE_GAS_COST) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }

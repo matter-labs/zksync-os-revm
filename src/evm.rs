@@ -31,11 +31,12 @@ impl<CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>, INSP>
 {
     /// Create a new ZKsync OS EVM.
     pub fn new(ctx: CTX, inspector: INSP) -> Self {
+        let spec = ctx.cfg().spec().into();
         Self(Evm {
             precompiles: ZKsyncPrecompiles::new_with_spec(ctx.cfg().spec()),
             ctx,
             inspector,
-            instruction: EthInstructions::new_mainnet(),
+            instruction: EthInstructions::new_mainnet_with_spec(spec),
             frame_stack: FrameStack::new(),
         })
     }
