@@ -119,7 +119,7 @@ pub fn l1_messenger_precompile_call<CTX: ContextTr>(
         return revert(gas);
     }
 
-    if !gas.record_cost(1) {
+    if !gas.record_regular_cost(1) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }

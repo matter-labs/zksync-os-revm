@@ -14,7 +14,7 @@ use revm::{
         Block, Cfg, ContextSetters, ContextTr, JournalTr, Transaction,
         context::ContextError,
         journaled_state::{JournalCheckpoint, account::JournaledAccountTr},
-        result::{EVMError, ExecutionResult, FromStringError, HaltReason},
+        result::{EVMError, ExecutionResult, FromStringError, HaltReason, ResultGas},
         transaction::TransactionType,
     },
     handler::{
@@ -195,7 +195,8 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
             gas.floor_gas = 0;
         }
         let gas_limit = tx.gas_limit();
-        gas.initial_gas = gas.initial_gas.min(gas_limit);
+        gas.initial_total_gas = gas.initial_total_gas.min(gas_limit);
+        gas.initial_state_gas = gas.initial_state_gas.min(gas.initial_total_gas);
         gas.floor_gas = gas.floor_gas.min(gas_limit);
         gas
     }
@@ -392,6 +393,8 @@ where
             tx,
             spec_id.into_eth_spec(),
             is_eip7623_disabled,
+            ctx.cfg().is_amsterdam_eip8037_enabled(),
+            ctx.cfg().tx_gas_limit_cap(),
         );
 
         match validated {
@@ -419,7 +422,7 @@ where
         exec_result: &mut FrameResult,
         init_and_floor_gas: InitialAndFloorGas,
         eip7702_gas_refund: i64,
-    ) -> Result<(), Self::Error> {
+    ) -> Result<ResultGas, Self::Error> {
         let is_success = exec_result.interpreter_result().result.is_ok();
         if let Some(checkpoint) = self.pending_value_mint_checkpoint.take() {
             if is_success {
@@ -428,7 +431,6 @@ where
                 evm.ctx().journal_mut().checkpoint_revert(checkpoint);
             }
         }
-
         if let Some(gas_used_override) = evm.ctx().tx().gas_used_override() {
             let gas_limit = evm.ctx().tx().gas_limit();
             // Just in case use at most `gas_limit` gas to prevent the underflow
@@ -442,24 +444,29 @@ where
             // IMPORTANT: ignore EVM-native refunds: (do NOT call `gas.record_refund(...)` here)
             //    self.refund(evm, exec_result, eip7702_gas_refund);  // <-- intentionally NOT called
 
+            let result_gas =
+                post_execution::build_result_gas(exec_result.gas(), init_and_floor_gas);
+
             // Reimburse sender and reward beneficiary using the rewritten Gas.
             if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
                 self.notify_l2_asset_tracker(evm, exec_result)?;
             }
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
+            Ok(result_gas)
         } else {
             // Vanilla path: keep default EVM accounting
             if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
                 self.notify_l2_asset_tracker(evm, exec_result)?;
             }
             self.refund(evm, exec_result, eip7702_gas_refund);
+            let result_gas =
+                post_execution::build_result_gas(exec_result.gas(), init_and_floor_gas);
             self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
+            Ok(result_gas)
         }
-
-        Ok(())
     }
 
     fn execution(
@@ -471,12 +478,12 @@ where
             return self.forced_fail_execution_result(evm);
         }
 
-        let gas_limit = evm
-            .ctx()
-            .tx()
-            .gas_limit()
-            .saturating_sub(init_and_floor_gas.initial_gas);
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let (gas_limit, reservoir) = init_and_floor_gas.initial_gas_and_reservoir(
+            evm.ctx().tx().gas_limit(),
+            evm.ctx().cfg().tx_gas_limit_cap(),
+            evm.ctx().cfg().is_amsterdam_eip8037_enabled(),
+        );
+        let first_frame_input = self.first_frame_input(evm, gas_limit, reservoir)?;
         let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
         self.last_frame_result(evm, &mut frame_result)?;
         Ok(frame_result)
@@ -485,6 +492,7 @@ where
     fn validate_against_state_and_deduct_caller(
         &self,
         evm: &mut Self::Evm,
+        _init_and_floor_gas: &mut InitialAndFloorGas,
     ) -> Result<(), Self::Error> {
         let ctx = evm.ctx();
 
@@ -632,7 +640,11 @@ where
 
         let effective_gas_price =
             Self::effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
-        let spent_fee = U256::from(frame_result.gas().used()) * U256::from(effective_gas_price);
+        let gas_used = frame_result
+            .gas()
+            .used()
+            .saturating_sub(frame_result.gas().reservoir());
+        let spent_fee = U256::from(gas_used) * U256::from(effective_gas_price);
 
         match l1_mode {
             L1TxAccountingMode::Legacy => {
@@ -686,8 +698,12 @@ where
         let spec_id = evm.ctx().cfg().spec();
         let effective_gas_price =
             Self::effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
-        let reward = U256::from(frame_result.gas().used()) * U256::from(effective_gas_price);
         let l1_mode = Self::l1_tx_accounting_mode(evm.ctx().tx(), spec_id);
+        let gas_used = frame_result
+            .gas()
+            .used()
+            .saturating_sub(frame_result.gas().reservoir());
+        let reward = U256::from(gas_used) * U256::from(effective_gas_price);
 
         if l1_mode == Some(L1TxAccountingMode::AtlasV3) {
             // AtlasV3 L1->L2 fees are paid from treasury, not minted.
@@ -708,6 +724,7 @@ where
         &mut self,
         evm: &mut Self::Evm,
         frame_result: <<Self::Evm as EvmTr>::Frame as FrameTr>::FrameResult,
+        result_gas: ResultGas,
     ) -> Result<ExecutionResult<Self::HaltReason>, Self::Error> {
         match core::mem::replace(evm.ctx().error(), Ok(())) {
             Err(ContextError::Db(e)) => return Err(e.into()),
@@ -715,7 +732,7 @@ where
             Ok(_) => (),
         }
 
-        let exec_result = post_execution::output(evm.ctx(), frame_result);
+        let exec_result = post_execution::output(evm.ctx(), frame_result, result_gas);
 
         evm.ctx().journal_mut().commit_tx();
         evm.ctx().local_mut().clear();
@@ -748,12 +765,12 @@ where
             return self.forced_fail_execution_result(evm);
         }
 
-        let gas_limit = evm
-            .ctx()
-            .tx()
-            .gas_limit()
-            .saturating_sub(init_and_floor_gas.initial_gas);
-        let first_frame_input = self.first_frame_input(evm, gas_limit)?;
+        let (gas_limit, reservoir) = init_and_floor_gas.initial_gas_and_reservoir(
+            evm.ctx().tx().gas_limit(),
+            evm.ctx().cfg().tx_gas_limit_cap(),
+            evm.ctx().cfg().is_amsterdam_eip8037_enabled(),
+        );
+        let first_frame_input = self.first_frame_input(evm, gas_limit, reservoir)?;
         let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
         self.last_frame_result(evm, &mut frame_result)?;
         Ok(frame_result)

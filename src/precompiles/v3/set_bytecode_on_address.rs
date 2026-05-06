@@ -98,7 +98,7 @@ pub fn set_bytecode_on_address_internal<CTX: ContextTr>(
 ) -> InterpreterResult {
     // Charge extra gas for `set_bytecode_details`
     let extra_gas = set_bytecode_details_extra_gas(bytecode_length as u64);
-    if !gas.record_cost(extra_gas) {
+    if !gas.record_regular_cost(extra_gas) {
         return oog_error();
     }
 
@@ -124,7 +124,7 @@ pub fn set_bytecode_on_address_internal<CTX: ContextTr>(
         WARM_STORAGE_READ_COST
     };
     // Charge base cost for warm/cold read
-    if !gas.record_cost(gas_for_access) {
+    if !gas.record_regular_cost(gas_for_access) {
         return oog_error();
     }
 

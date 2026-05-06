@@ -40,7 +40,7 @@ where
         return revert(gas);
     }
 
-    if !gas.record_cost(1) {
+    if !gas.record_regular_cost(1) {
         return oog_error();
     }
 

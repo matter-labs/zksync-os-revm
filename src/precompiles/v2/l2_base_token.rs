@@ -50,7 +50,7 @@ pub fn l2_base_token_precompile_call<CTX: ContextTr>(
     }
 
     // Charge base cost for calling system hook
-    if !gas.record_cost(HOOK_BASE_GAS_COST) {
+    if !gas.record_regular_cost(HOOK_BASE_GAS_COST) {
         return oog_error();
     }
 
@@ -109,7 +109,7 @@ fn withdraw<CTX: ContextTr>(ctx: &mut CTX, inputs: &CallInputs, mut gas: Gas) ->
     drop(view);
 
     // Charge gas for the token burning
-    if !gas.record_cost(WARM_STORAGE_READ_COST) {
+    if !gas.record_regular_cost(WARM_STORAGE_READ_COST) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }
@@ -151,7 +151,7 @@ fn withdraw<CTX: ContextTr>(ctx: &mut CTX, inputs: &CallInputs, mut gas: Gas) ->
 
     // Charge gas for emitting log
     let gas_cost = log_gas_cost(3, 32);
-    if !gas.record_cost(gas_cost) {
+    if !gas.record_regular_cost(gas_cost) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }
@@ -252,7 +252,7 @@ fn withdraw_with_message<CTX: ContextTr>(
     drop(view);
 
     // Charge gas for the token burning
-    if !gas.record_cost(WARM_STORAGE_READ_COST) {
+    if !gas.record_regular_cost(WARM_STORAGE_READ_COST) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }
@@ -318,7 +318,7 @@ fn withdraw_with_message<CTX: ContextTr>(
 
     // Charge gas for emitting log
     let gas_cost = log_gas_cost(3, abi_encoded_event_length as u64);
-    if !gas.record_cost(gas_cost) {
+    if !gas.record_regular_cost(gas_cost) {
         // Out-of-gas error
         return InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0));
     }
