@@ -2807,4 +2807,5 @@ dependencies = [
  "auto_impl",
  "revm",
  "serde",
+ "serde_json",
 ]

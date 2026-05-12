@@ -12,13 +12,19 @@ pub const L1_PRIORITY_TRANSACTION_TYPE: u8 = 0x7f;
 pub struct L1ToL2TransactionParts {
     pub mint: Option<U256>,
     pub refund_recipient: Option<Address>,
+    pub settlement_layer_chain_id: Option<U256>,
 }
 
 impl L1ToL2TransactionParts {
-    pub fn new(mint: Option<U256>, refund_recipient: Option<Address>) -> Self {
+    pub fn new(
+        mint: Option<U256>,
+        refund_recipient: Option<Address>,
+        settlement_layer_chain_id: Option<U256>,
+    ) -> Self {
         Self {
             mint,
             refund_recipient,
+            settlement_layer_chain_id,
         }
     }
 }

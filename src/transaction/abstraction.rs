@@ -13,6 +13,8 @@ use revm::{
     primitives::{Address, B256, Bytes, TxKind, U256},
 };
 
+const SERVICE_TRANSACTION_TYPE: u8 = 0x7d;
+
 /// ZKsync OS Transaction trait.
 #[auto_impl(&, &mut, Box, Arc)]
 pub trait ZkTxTr: Transaction {
@@ -25,9 +27,15 @@ pub trait ZkTxTr: Transaction {
 
     fn refund_recipient(&self) -> Option<Address>;
 
+    fn settlement_layer_chain_id(&self) -> Option<U256>;
+
     fn gas_used_override(&self) -> Option<u64>;
 
     fn force_fail(&self) -> bool;
+
+    fn is_service_tx(&self) -> bool {
+        self.tx_type() == SERVICE_TRANSACTION_TYPE
+    }
 }
 
 /// ZKsync OS transaction.
@@ -41,6 +49,9 @@ pub struct ZKsyncTx<T: Transaction> {
     pub gas_used_override: Option<u64>,
     /// The execution status (success/revert) from the original ZKsync OS environment.
     pub force_fail: bool,
+    /// Marks service transactions (type `0x7d`) that should not participate in nonce semantics.
+    #[serde(default)]
+    pub service_tx: bool,
 }
 
 impl<T: Transaction> AsRef<T> for ZKsyncTx<T> {
@@ -57,6 +68,7 @@ impl<T: Transaction> ZKsyncTx<T> {
             l1_to_l2_part: L1ToL2TransactionParts::default(),
             gas_used_override: None,
             force_fail: false,
+            service_tx: false,
         }
     }
 }
@@ -75,6 +87,7 @@ impl Default for ZKsyncTx<TxEnv> {
             l1_to_l2_part: L1ToL2TransactionParts::default(),
             gas_used_override: None,
             force_fail: false,
+            service_tx: false,
         }
     }
 }
@@ -185,12 +198,20 @@ impl<T: Transaction> ZkTxTr for ZKsyncTx<T> {
         self.l1_to_l2_part.refund_recipient
     }
 
+    fn settlement_layer_chain_id(&self) -> Option<U256> {
+        self.l1_to_l2_part.settlement_layer_chain_id
+    }
+
     fn gas_used_override(&self) -> Option<u64> {
         self.gas_used_override
     }
 
     fn force_fail(&self) -> bool {
         self.force_fail
+    }
+
+    fn is_service_tx(&self) -> bool {
+        self.service_tx || self.tx_type() == SERVICE_TRANSACTION_TYPE
     }
 }
 
@@ -201,6 +222,7 @@ pub struct ZKsyncTxBuilder {
     l1_to_l2_part: L1ToL2TransactionParts,
     gas_used_override: Option<u64>,
     force_fail: bool,
+    service_tx: bool,
 }
 
 impl ZKsyncTxBuilder {
@@ -211,6 +233,7 @@ impl ZKsyncTxBuilder {
             l1_to_l2_part: L1ToL2TransactionParts::default(),
             gas_used_override: None,
             force_fail: false,
+            service_tx: false,
         }
     }
 
@@ -240,9 +263,21 @@ impl ZKsyncTxBuilder {
         self
     }
 
+    /// Marks transaction as service tx (nonced-less tx replay path).
+    pub fn service_tx(mut self, service_tx: bool) -> Self {
+        self.service_tx = service_tx;
+        self
+    }
+
     /// Set the refund recipient of the L1 -> L2 part of the transaction.
     pub fn refund_recipient(mut self, refund_recipient: Option<Address>) -> Self {
         self.l1_to_l2_part.refund_recipient = refund_recipient;
+        self
+    }
+
+    /// Set the settlement-layer chain id of the L1 -> L2 part of the transaction.
+    pub fn settlement_layer_chain_id(mut self, settlement_layer_chain_id: Option<U256>) -> Self {
+        self.l1_to_l2_part.settlement_layer_chain_id = settlement_layer_chain_id;
         self
     }
 
@@ -260,6 +295,7 @@ impl ZKsyncTxBuilder {
             l1_to_l2_part: self.l1_to_l2_part,
             gas_used_override: self.gas_used_override,
             force_fail: self.force_fail,
+            service_tx: self.service_tx,
         }
     }
 
@@ -273,6 +309,7 @@ impl ZKsyncTxBuilder {
             l1_to_l2_part: self.l1_to_l2_part,
             gas_used_override: self.gas_used_override,
             force_fail: self.force_fail,
+            service_tx: self.service_tx,
         })
     }
 }
@@ -296,6 +333,7 @@ impl From<TxEnvBuildError> for ZkBuilderror {
 mod tests {
     use super::*;
     use revm::{context_interface::Transaction, primitives::Address};
+    use serde_json::Value;
 
     #[test]
     fn test_deposit_transaction_fields() {
@@ -317,5 +355,56 @@ mod tests {
         // Verify gas related calculations - deposit transactions use gas_price for effective gas price
         assert_eq!(zk_tx.effective_gas_price(90), 95);
         assert_eq!(zk_tx.max_fee_per_gas(), 100);
+    }
+
+    #[test]
+    fn test_service_tx_default_is_false() {
+        let tx_from_build = ZKsyncTx::builder().build().unwrap();
+        let tx_from_build_fill = ZKsyncTx::builder().build_fill();
+
+        assert!(!tx_from_build.service_tx);
+        assert!(!tx_from_build_fill.service_tx);
+    }
+
+    #[test]
+    fn test_service_tx_builder_persists_to_build_and_build_fill() {
+        let tx_from_build = ZKsyncTx::builder().service_tx(true).build().unwrap();
+        let tx_from_build_fill = ZKsyncTx::builder().service_tx(true).build_fill();
+
+        assert!(tx_from_build.service_tx);
+        assert!(tx_from_build_fill.service_tx);
+        assert!(tx_from_build.is_service_tx());
+        assert!(tx_from_build_fill.is_service_tx());
+    }
+
+    #[test]
+    fn test_service_tx_serde_compatibility_and_roundtrip() {
+        let tx = ZKsyncTx::builder().service_tx(true).build_fill();
+        let serialized = serde_json::to_value(&tx).expect("serialize tx");
+
+        let mut legacy_like = serialized.clone();
+        let removed = legacy_like
+            .as_object_mut()
+            .expect("serialized tx must be object")
+            .remove("service_tx");
+        assert_eq!(removed, Some(Value::Bool(true)));
+
+        let deserialized_legacy: ZKsyncTx<TxEnv> =
+            serde_json::from_value(legacy_like).expect("deserialize legacy tx");
+        assert!(!deserialized_legacy.service_tx);
+
+        let roundtrip: ZKsyncTx<TxEnv> =
+            serde_json::from_value(serialized).expect("deserialize roundtrip tx");
+        assert!(roundtrip.service_tx);
+    }
+
+    #[test]
+    fn test_service_tx_type_implies_service_semantics_without_aux_flag() {
+        let tx = ZKsyncTx::builder()
+            .base(TxEnv::builder().tx_type(Some(SERVICE_TRANSACTION_TYPE)))
+            .build_fill();
+
+        assert!(!tx.service_tx);
+        assert!(tx.is_service_tx());
     }
 }
