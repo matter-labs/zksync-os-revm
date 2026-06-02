@@ -35,7 +35,8 @@ impl ZkSpecId {
     /// Converts the [`ZkSpecId`] into a [`SpecId`].
     pub const fn into_eth_spec(self) -> SpecId {
         match self {
-            Self::AtlasV1 | Self::AtlasV2 | Self::AtlasV3 => SpecId::CANCUN,
+            Self::AtlasV1 | Self::AtlasV2 => SpecId::CANCUN,
+            Self::AtlasV3 => SpecId::PRAGUE,
         }
     }
 
