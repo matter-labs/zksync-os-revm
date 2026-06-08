@@ -14,19 +14,29 @@ use revm::{
         Block, Cfg, ContextSetters, ContextTr, JournalTr, Transaction,
         context::ContextError,
         journaled_state::{JournalCheckpoint, account::JournaledAccountTr},
-        result::{EVMError, ExecutionResult, FromStringError, HaltReason, ResultGas},
+        result::{
+            EVMError, ExecutionResult, FromStringError, HaltReason, InvalidHeader, ResultGas,
+        },
         transaction::TransactionType,
     },
     handler::{
-        EthFrame, EvmTr, FrameResult, Handler, MainnetHandler, evm::FrameTr, handler::EvmTrError,
-        post_execution, pre_execution::validate_account_nonce_and_code, system_call::SystemCallTx,
+        EthFrame, EvmTr, FrameResult, Handler, MainnetHandler,
+        evm::FrameTr,
+        handler::EvmTrError,
+        post_execution,
+        pre_execution::{apply_auth_list, validate_account_nonce_and_code},
+        system_call::SystemCallTx,
     },
     inspector::{Inspector, InspectorEvmTr, InspectorHandler},
     interpreter::{
         CallOutcome, Gas, InitialAndFloorGas, InstructionResult, InterpreterResult,
         interpreter::EthInterpreter, interpreter_action::FrameInit,
     },
-    primitives::{Bytes, U256},
+    primitives::{
+        Bytes, U256,
+        eip7702::{PER_AUTH_BASE_COST, PER_EMPTY_ACCOUNT_COST},
+        hardfork::SpecId,
+    },
     state::EvmState,
 };
 
@@ -368,13 +378,30 @@ where
     type HaltReason = HaltReason;
 
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        let ctx = evm.ctx();
-        let tx = ctx.tx();
-        if tx.is_l1_to_l2_tx() {
+        let (is_l1_to_l2, spec_id) = {
+            let ctx = evm.ctx();
+            (ctx.tx().is_l1_to_l2_tx(), ctx.cfg().spec())
+        };
+        if is_l1_to_l2 {
             return Ok(());
         }
 
-        self.mainnet.validate_env(evm)
+        if !spec_id.supports_eip7702() {
+            return self.mainnet.validate_env(evm);
+        }
+
+        // revm gates type-0x04 acceptance on `SpecId >= PRAGUE`. Validate under Prague
+        // so set-code txs are admitted; this differs from Cancun only by accepting
+        // EIP-7702 txs, so other tx types are unaffected. Execution stays on Cancun.
+        let spec = SpecId::PRAGUE;
+        let ctx = evm.ctx();
+        if spec.is_enabled_in(SpecId::MERGE) && ctx.block().prevrandao().is_none() {
+            return Err(InvalidHeader::PrevrandaoNotSet.into());
+        }
+        if spec.is_enabled_in(SpecId::CANCUN) && ctx.block().blob_excess_gas_and_price().is_none() {
+            return Err(InvalidHeader::ExcessBlobGasNotSet.into());
+        }
+        revm::handler::validation::validate_tx_env(ctx, spec).map_err(Into::into)
     }
 
     #[inline]
@@ -389,10 +416,18 @@ where
         let is_relaxed_l1 =
             Self::l1_tx_accounting_mode(tx, spec_id) == Some(L1TxAccountingMode::AtlasV3);
 
+        // Charge the auth-list intrinsic gas (25000/auth) by metering under Prague,
+        // but keep the EIP-7623 calldata floor off (not part of "Cancun + 7702").
+        let (gas_spec, gas_eip7623_disabled) = if spec_id.supports_eip7702() {
+            (SpecId::PRAGUE, true)
+        } else {
+            (spec_id.into_eth_spec(), is_eip7623_disabled)
+        };
+
         let validated = revm::handler::validation::validate_initial_tx_gas(
             tx,
-            spec_id.into_eth_spec(),
-            is_eip7623_disabled,
+            gas_spec,
+            gas_eip7623_disabled,
             ctx.cfg().is_amsterdam_eip8037_enabled(),
             ctx.cfg().tx_gas_limit_cap(),
         );
@@ -413,6 +448,42 @@ where
             }
             Err(err) => Err(err.into()),
         }
+    }
+
+    /// Apply the EIP-7702 authorization list with the canonical refund.
+    ///
+    /// revm reads the per-auth refund from the eth spec's gas params, which are
+    /// Cancun's (= 0) here, so we pass the Prague value explicitly.
+    #[inline]
+    fn apply_eip7702_auth_list(
+        &self,
+        evm: &mut Self::Evm,
+        _init_and_floor_gas: &mut InitialAndFloorGas,
+    ) -> Result<u64, Self::Error> {
+        let chain_id = evm.ctx().cfg().chain_id();
+        let supports_eip7702 = evm.ctx().cfg().spec().supports_eip7702();
+        let (tx, journal) = evm.ctx().tx_journal_mut();
+
+        // Only set-code (type-0x04) txs carry an authorization list.
+        if tx.tx_type() != TransactionType::Eip7702 as u8 {
+            return Ok(0);
+        }
+
+        // Guard the refund on the spec; type-0x04 only reaches here once admitted.
+        let refund_per_auth = if supports_eip7702 {
+            PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST
+        } else {
+            0
+        };
+
+        // The EIP-8037 reservoir split is inactive at Cancun, so the full refund is
+        // regular gas; nothing to record on `init_and_floor_gas`.
+        apply_auth_list::<_, Self::Error>(
+            chain_id,
+            refund_per_auth,
+            tx.authorization_list(),
+            journal,
+        )
     }
 
     #[inline]

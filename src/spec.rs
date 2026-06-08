@@ -45,6 +45,12 @@ impl ZkSpecId {
     pub const fn is_enabled_in(self, other: ZkSpecId) -> bool {
         self as u8 <= other as u8
     }
+
+    /// Whether EIP-7702 (set-code txs) is enabled. `AtlasV3` is "Cancun + 7702":
+    /// the eth spec stays Cancun (see [`Self::into_eth_spec`]); this only adds 7702.
+    pub const fn supports_eip7702(self) -> bool {
+        matches!(self, ZkSpecId::AtlasV3)
+    }
 }
 
 impl From<ZkSpecId> for SpecId {
