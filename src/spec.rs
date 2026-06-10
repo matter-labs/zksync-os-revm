@@ -27,8 +27,9 @@ use revm::primitives::hardfork::{SpecId, UnknownHardfork};
 pub enum ZkSpecId {
     AtlasV1,
     AtlasV2,
-    #[default]
     AtlasV3,
+    #[default]
+    AtlasV4,
 }
 
 impl ZkSpecId {
@@ -36,6 +37,7 @@ impl ZkSpecId {
     pub const fn into_eth_spec(self) -> SpecId {
         match self {
             Self::AtlasV1 | Self::AtlasV2 | Self::AtlasV3 => SpecId::CANCUN,
+            Self::AtlasV4 => SpecId::OSAKA,
         }
     }
 
@@ -61,6 +63,7 @@ impl FromStr for ZkSpecId {
             name::ATLASV1 => Ok(ZkSpecId::AtlasV1),
             name::ATLASV2 => Ok(ZkSpecId::AtlasV2),
             name::ATLASV3 => Ok(ZkSpecId::AtlasV3),
+            name::ATLASV4 => Ok(ZkSpecId::AtlasV4),
             _ => Err(UnknownHardfork),
         }
     }
@@ -72,6 +75,7 @@ impl From<ZkSpecId> for &'static str {
             ZkSpecId::AtlasV1 => name::ATLASV1,
             ZkSpecId::AtlasV2 => name::ATLASV2,
             ZkSpecId::AtlasV3 => name::ATLASV3,
+            ZkSpecId::AtlasV4 => name::ATLASV4,
         }
     }
 }
@@ -82,4 +86,5 @@ pub mod name {
     pub const ATLASV1: &str = "AtlasV1";
     pub const ATLASV2: &str = "AtlasV2";
     pub const ATLASV3: &str = "AtlasV3";
+    pub const ATLASV4: &str = "AtlasV4";
 }
