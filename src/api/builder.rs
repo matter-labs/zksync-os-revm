@@ -28,13 +28,13 @@ pub trait ZkBuilder: Sized {
     ) -> DefaultZKsyncEvm<Self::Context, INSP>;
 }
 
-impl<BLOCK, TX, CFG, DB, JOURNAL> ZkBuilder for Context<BLOCK, TX, CFG, DB, JOURNAL>
+impl<BLOCK, TX, CFG, DB, JOURNAL, CHAIN> ZkBuilder for Context<BLOCK, TX, CFG, DB, JOURNAL, CHAIN>
 where
     BLOCK: Block,
     TX: ZkTxTr,
     CFG: Cfg<Spec = ZkSpecId>,
     DB: Database,
-    JOURNAL: JournalTr<Database = DB, State = EvmState>,
+    JOURNAL: JournalTr<Database = DB, State = EvmState> + crate::l2_to_l1_logs::L2ToL1LogStore,
 {
     type Context = Self;
 
