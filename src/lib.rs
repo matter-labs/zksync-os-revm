@@ -5,14 +5,17 @@ pub mod api;
 pub mod constants;
 pub mod evm;
 pub mod handler;
+pub mod journal;
+pub mod l2_to_l1_logs;
 pub mod precompiles;
 pub mod spec;
 pub mod transaction;
 
 pub use api::{
     builder::ZkBuilder,
-    default_ctx::{DefaultZk, ZkContext},
+    default_ctx::{DefaultZk, ZkContext, zk_context},
 };
 pub use evm::ZKsyncEvm;
+pub use journal::ZkJournal;
 pub use spec::*;
 pub use transaction::{ZKsyncTx, error::ZKsyncTxError};
