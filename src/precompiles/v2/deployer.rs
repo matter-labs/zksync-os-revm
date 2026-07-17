@@ -27,11 +27,15 @@ pub const L2_GENESIS_UPGRADE_ADDRESS: Address =
 pub const MAX_CODE_SIZE: usize = 0x6000;
 
 /// Run the deployer precompile.
-pub fn deployer_precompile_call<CTX: ContextTr>(
+pub fn deployer_precompile_call<CTX>(
     ctx: &mut CTX,
     inputs: &CallInputs,
     is_delegate: bool,
-) -> InterpreterResult {
+) -> InterpreterResult
+where
+    CTX: ContextTr,
+    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore,
+{
     let view = CalldataView::new(ctx, &inputs.input);
     let mut calldata = view.as_slice();
     let caller = inputs.caller;
@@ -65,7 +69,7 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
                 return revert(gas);
             }
 
-            // decoding according to setDeployedCodeEVM(address,bytes)
+            // decoding according to setBytecodeDetailsEVM(address,bytes32,uint32,bytes32)
             calldata = &calldata[4..];
             if calldata.len() < 128 {
                 return revert(gas);
@@ -77,7 +81,7 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
             }
             let address = Address::from_slice(&calldata[12..32]);
 
-            let bytecode_hash =
+            let _bytecode_hash =
                 B256::from_slice(calldata[32..64].try_into().expect("Always valid"));
 
             let bytecode_length: u32 = match U256::from_be_slice(&calldata[64..96]).try_into() {
@@ -87,7 +91,7 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
                 }
             };
 
-            let _observable_bytecode_hash =
+            let observable_bytecode_hash =
                 B256::from_slice(calldata[96..128].try_into().expect("Always valid"));
 
             // Although this can be called as a part of protocol upgrade,
@@ -106,12 +110,19 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
                 return oog_error();
             }
 
-            let bytecode = ctx.db_mut().code_by_hash(bytecode_hash).expect(
+            // Look up by observable (keccak256) hash. Each DB implementation provides
+            // bytecodes keyed by keccak256: ProvenDB directly, RevmStateProvider via cache.
+            let bytecode = ctx.db_mut().code_by_hash(observable_bytecode_hash).expect(
                 "The bytecode is expected to be pre-loaded for any deployer precompile call",
             );
 
+            let bytecode_length = bytecode_length as usize;
+            if bytecode.original_bytes().len() < bytecode_length {
+                return revert(gas);
+            }
+
             let bytecode_padded = Bytecode::new_legacy(Bytes::copy_from_slice(
-                &bytecode.original_bytes()[0..bytecode_length as usize],
+                &bytecode.original_bytes()[0..bytecode_length],
             ));
             let account = ctx
                 .journal_mut()
@@ -132,6 +143,7 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
                 .load_account(address)
                 .expect("load_account");
             ctx.journal_mut().set_code(address, bytecode_padded);
+
             InterpreterResult::new(InstructionResult::Return, [].into(), gas)
         }
         _ => revert(gas),

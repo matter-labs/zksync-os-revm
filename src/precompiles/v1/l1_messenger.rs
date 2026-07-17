@@ -1,5 +1,6 @@
 use std::vec::Vec;
 
+use crate::l2_to_l1_logs::L2ToL1LogStore;
 use crate::precompiles::calldata_view::CalldataView;
 use crate::precompiles::utils::revert;
 use revm::interpreter::CallInputs;
@@ -27,12 +28,16 @@ fn b160_to_b256(addr: Address) -> B256 {
     B256::from(out)
 }
 
-pub(crate) fn send_to_l1_inner<CTX: ContextTr>(
+pub(crate) fn send_to_l1_inner<CTX>(
     ctx: &mut CTX,
     gas: &mut Gas,
     abi_encoded_message: Vec<u8>,
     caller: Address,
-) -> InterpreterResult {
+) -> InterpreterResult
+where
+    CTX: ContextTr,
+    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore,
+{
     let data = abi_encoded_message.as_slice();
 
     let abi_encoded_message_len: u32 = match data.len().try_into() {
@@ -97,17 +102,23 @@ pub(crate) fn send_to_l1_inner<CTX: ContextTr>(
     };
     ctx.journal_mut().log(log);
 
-    // TODO: save L2 -> L1 message in a context of block
+    // Record the structured L2→L1 log in the journal.
+    ctx.journal_mut()
+        .push_l2_to_l1_log(L1_MESSENGER_ADDRESS, b160_to_b256(caller), message_hash);
 
     InterpreterResult::new(InstructionResult::Return, message_hash.into(), *gas)
 }
 
 /// Run the L1 messenger precompile.
-pub fn l1_messenger_precompile_call<CTX: ContextTr>(
+pub fn l1_messenger_precompile_call<CTX>(
     ctx: &mut CTX,
     inputs: &CallInputs,
     is_delegate: bool,
-) -> InterpreterResult {
+) -> InterpreterResult
+where
+    CTX: ContextTr,
+    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore,
+{
     let view = CalldataView::new(ctx, &inputs.input);
     let calldata = view.as_slice();
     let caller = inputs.caller;
