@@ -5,6 +5,7 @@ use std::boxed::Box;
 use crate::{
     api::exec::ZkContextTr,
     constants::{BASE_TOKEN_HOLDER_ADDRESS, L2_ASSET_TRACKER_ADDRESS, L2_BASE_TOKEN_ADDRESS},
+    l2_to_l1_logs::L2ToL1LogStore,
     spec::ZkSpecId,
     transaction::{ZKsyncTxError, ZkTxTr},
 };
@@ -14,19 +15,29 @@ use revm::{
         Block, Cfg, ContextSetters, ContextTr, JournalTr, Transaction,
         context::ContextError,
         journaled_state::{JournalCheckpoint, account::JournaledAccountTr},
-        result::{EVMError, ExecutionResult, FromStringError, HaltReason, ResultGas},
+        result::{
+            EVMError, ExecutionResult, FromStringError, HaltReason, InvalidHeader, ResultGas,
+        },
         transaction::TransactionType,
     },
     handler::{
-        EthFrame, EvmTr, FrameResult, Handler, MainnetHandler, evm::FrameTr, handler::EvmTrError,
-        post_execution, pre_execution::validate_account_nonce_and_code, system_call::SystemCallTx,
+        EthFrame, EvmTr, FrameResult, Handler, MainnetHandler,
+        evm::FrameTr,
+        handler::EvmTrError,
+        post_execution,
+        pre_execution::{apply_auth_list, validate_account_nonce_and_code},
+        system_call::SystemCallTx,
     },
     inspector::{Inspector, InspectorEvmTr, InspectorHandler},
     interpreter::{
         CallOutcome, Gas, InitialAndFloorGas, InstructionResult, InterpreterResult,
         interpreter::EthInterpreter, interpreter_action::FrameInit,
     },
-    primitives::{Bytes, U256},
+    primitives::{
+        Bytes, U256,
+        eip7702::{PER_AUTH_BASE_COST, PER_EMPTY_ACCOUNT_COST},
+        hardfork::SpecId,
+    },
     state::EvmState,
 };
 
@@ -368,13 +379,30 @@ where
     type HaltReason = HaltReason;
 
     fn validate_env(&self, evm: &mut Self::Evm) -> Result<(), Self::Error> {
-        let ctx = evm.ctx();
-        let tx = ctx.tx();
-        if tx.is_l1_to_l2_tx() {
+        let (is_l1_to_l2, spec_id) = {
+            let ctx = evm.ctx();
+            (ctx.tx().is_l1_to_l2_tx(), ctx.cfg().spec())
+        };
+        if is_l1_to_l2 {
             return Ok(());
         }
 
-        self.mainnet.validate_env(evm)
+        if !spec_id.supports_eip7702() {
+            return self.mainnet.validate_env(evm);
+        }
+
+        // revm gates type-0x04 acceptance on `SpecId >= PRAGUE`. Validate under Prague
+        // so set-code txs are admitted; this differs from Cancun only by accepting
+        // EIP-7702 txs, so other tx types are unaffected. Execution stays on Cancun.
+        let spec = SpecId::PRAGUE;
+        let ctx = evm.ctx();
+        if spec.is_enabled_in(SpecId::MERGE) && ctx.block().prevrandao().is_none() {
+            return Err(InvalidHeader::PrevrandaoNotSet.into());
+        }
+        if spec.is_enabled_in(SpecId::CANCUN) && ctx.block().blob_excess_gas_and_price().is_none() {
+            return Err(InvalidHeader::ExcessBlobGasNotSet.into());
+        }
+        revm::handler::validation::validate_tx_env(ctx, spec).map_err(Into::into)
     }
 
     #[inline]
@@ -389,10 +417,18 @@ where
         let is_relaxed_l1 =
             Self::l1_tx_accounting_mode(tx, spec_id) == Some(L1TxAccountingMode::AtlasV3);
 
+        // Charge the auth-list intrinsic gas (25000/auth) by metering under Prague,
+        // but keep the EIP-7623 calldata floor off (not part of "Cancun + 7702").
+        let (gas_spec, gas_eip7623_disabled) = if spec_id.supports_eip7702() {
+            (SpecId::PRAGUE, true)
+        } else {
+            (spec_id.into_eth_spec(), is_eip7623_disabled)
+        };
+
         let validated = revm::handler::validation::validate_initial_tx_gas(
             tx,
-            spec_id.into_eth_spec(),
-            is_eip7623_disabled,
+            gas_spec,
+            gas_eip7623_disabled,
             ctx.cfg().is_amsterdam_eip8037_enabled(),
             ctx.cfg().tx_gas_limit_cap(),
         );
@@ -415,6 +451,42 @@ where
         }
     }
 
+    /// Apply the EIP-7702 authorization list with the canonical refund.
+    ///
+    /// revm reads the per-auth refund from the eth spec's gas params, which are
+    /// Cancun's (= 0) here, so we pass the Prague value explicitly.
+    #[inline]
+    fn apply_eip7702_auth_list(
+        &self,
+        evm: &mut Self::Evm,
+        _init_and_floor_gas: &mut InitialAndFloorGas,
+    ) -> Result<u64, Self::Error> {
+        let chain_id = evm.ctx().cfg().chain_id();
+        let supports_eip7702 = evm.ctx().cfg().spec().supports_eip7702();
+        let (tx, journal) = evm.ctx().tx_journal_mut();
+
+        // Only set-code (type-0x04) txs carry an authorization list.
+        if tx.tx_type() != TransactionType::Eip7702 as u8 {
+            return Ok(0);
+        }
+
+        // Guard the refund on the spec; type-0x04 only reaches here once admitted.
+        let refund_per_auth = if supports_eip7702 {
+            PER_EMPTY_ACCOUNT_COST - PER_AUTH_BASE_COST
+        } else {
+            0
+        };
+
+        // The EIP-8037 reservoir split is inactive at Cancun, so the full refund is
+        // regular gas; nothing to record on `init_and_floor_gas`.
+        apply_auth_list::<_, Self::Error>(
+            chain_id,
+            refund_per_auth,
+            tx.authorization_list(),
+            journal,
+        )
+    }
+
     #[inline]
     fn post_execution(
         &self,
@@ -431,7 +503,8 @@ where
                 evm.ctx().journal_mut().checkpoint_revert(checkpoint);
             }
         }
-        if let Some(gas_used_override) = evm.ctx().tx().gas_used_override() {
+
+        let result_gas = if let Some(gas_used_override) = evm.ctx().tx().gas_used_override() {
             let gas_limit = evm.ctx().tx().gas_limit();
             // Just in case use at most `gas_limit` gas to prevent the underflow
             let used = gas_used_override.min(gas_limit);
@@ -453,7 +526,7 @@ where
             }
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
-            Ok(result_gas)
+            result_gas
         } else {
             // Vanilla path: keep default EVM accounting
             if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
@@ -465,8 +538,32 @@ where
             self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
-            Ok(result_gas)
+            result_gas
+        };
+
+        // Emit the bootloader result L2→L1 log for L1→L2 transactions.
+        // In zksync-os this is done by the bootloader after each L1→L2 tx,
+        // after the operator fee and the refund. L2→L1 logs feed a rolling hash
+        // and the message tree, so the position of this log is part of the
+        // protocol.
+        // Since AtlasV3 (zksync-os v0.3.x), upgrade transactions no longer
+        // emit the result log "by protocol convention" — only priority ops do
+        // (basic_bootloader .../zk/process_l1_transaction.rs). Older versions
+        // emitted it for both.
+        let emit_result_log = if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
+            evm.ctx().tx().tx_type()
+                == crate::transaction::priority_tx::L1_PRIORITY_TRANSACTION_TYPE
+        } else {
+            evm.ctx().tx().is_l1_to_l2_tx()
+        };
+        if emit_result_log {
+            let tx_hash = evm.ctx().tx().tx_hash();
+            evm.ctx()
+                .journal_mut()
+                .emit_l1_tx_result(tx_hash, is_success);
         }
+
+        Ok(result_gas)
     }
 
     fn execution(
@@ -774,5 +871,154 @@ where
         let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
         self.last_frame_result(evm, &mut frame_result)?;
         Ok(frame_result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::builder::ZkBuilder;
+    use crate::api::default_ctx::zk_context;
+    use crate::precompiles::v1::l1_messenger::L1_MESSENGER_ADDRESS;
+    use crate::precompiles::v3::l1_messenger::L1_MESSENGER_HOOK_ADDRESS;
+    use crate::transaction::priority_tx::L1_PRIORITY_TRANSACTION_TYPE;
+    use crate::{ZKsyncTx, ZkSpecId};
+    use revm::{
+        ExecuteEvm,
+        context::TxEnv,
+        database::{CacheDB, EmptyDB},
+        primitives::{Address, B256, TxKind, address},
+        state::{AccountInfo, Bytecode},
+    };
+
+    const CALLER: Address = address!("0000000000000000000000000000000000000c0f");
+    const TARGET: Address = address!("0000000000000000000000000000000000001111");
+    const REFUND_RECIPIENT: Address = address!("0000000000000000000000000000000000002222");
+    const MESSAGE: [u8; 32] = [0xaa; 32];
+    const TX_GAS_LIMIT: u64 = 1_000_000;
+    const TX_GAS_PRICE: u128 = 1;
+
+    const OP_STOP: u8 = 0x00;
+    const OP_POP: u8 = 0x50;
+    const OP_MSTORE: u8 = 0x52;
+    const OP_GAS: u8 = 0x5a;
+    const OP_PUSH1: u8 = 0x60;
+    const OP_PUSH20: u8 = 0x73;
+    const OP_PUSH32: u8 = 0x7f;
+    const OP_CALL: u8 = 0xf1;
+
+    /// Code that writes `content` into memory at `offset`.
+    fn store_code(offset: u8, content: [u8; 32]) -> Vec<u8> {
+        let mut code = vec![OP_PUSH32];
+        code.extend_from_slice(&content);
+        code.extend_from_slice(&[OP_PUSH1, offset, OP_MSTORE]);
+        code
+    }
+
+    /// Code that calls `target` with the first `argument_length` memory bytes.
+    fn call_code(target: Address, argument_length: u8) -> Vec<u8> {
+        let mut code = vec![
+            OP_PUSH1,
+            0, // return data length
+            OP_PUSH1,
+            0, // return data offset
+            OP_PUSH1,
+            argument_length,
+            OP_PUSH1,
+            0, // argument offset
+            OP_PUSH1,
+            0, // call value
+            OP_PUSH20,
+        ];
+        code.extend_from_slice(target.as_slice());
+        code.extend_from_slice(&[OP_GAS, OP_CALL, OP_POP]);
+        code
+    }
+
+    /// Code of the L1 messenger contract: send [`MESSAGE`] to L1 through the hook.
+    fn message_sender_code() -> Bytes {
+        // The hook takes abi.encodePacked(address sender, bytes message).
+        let mut sender = [0u8; 32];
+        sender[..20].copy_from_slice(L1_MESSENGER_ADDRESS.as_slice());
+        let mut code = store_code(0, sender);
+        code.extend(store_code(20, MESSAGE));
+        code.extend(call_code(L1_MESSENGER_HOOK_ADDRESS, 52));
+        code.push(OP_STOP);
+        code.into()
+    }
+
+    /// Code of the L2 asset tracker: send one message to L1 on every notification.
+    fn asset_tracker_code() -> Bytes {
+        let mut code = call_code(L1_MESSENGER_ADDRESS, 0);
+        code.push(OP_STOP);
+        code.into()
+    }
+
+    /// Run one L1 priority transaction and return the L2→L1 logs it produces.
+    ///
+    /// The asset tracker sends a message to L1 on every fee and refund
+    /// notification, which makes the position of the result log observable.
+    fn run_priority_transaction(tx_hash: B256) -> Vec<crate::l2_to_l1_logs::L2ToL1Log> {
+        let mut database = CacheDB::new(EmptyDB::default());
+        database.insert_account_info(
+            BASE_TOKEN_HOLDER_ADDRESS,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                ..Default::default()
+            },
+        );
+        database.insert_account_info(
+            L1_MESSENGER_ADDRESS,
+            AccountInfo {
+                code: Some(Bytecode::new_raw(message_sender_code())),
+                ..Default::default()
+            },
+        );
+        database.insert_account_info(
+            L2_ASSET_TRACKER_ADDRESS,
+            AccountInfo {
+                code: Some(Bytecode::new_raw(asset_tracker_code())),
+                ..Default::default()
+            },
+        );
+
+        let mut evm = zk_context(database, ZkSpecId::AtlasV3).build_zk();
+        // The mint equals the prepaid fee, so there is no upfront transfer.
+        let mint = U256::from(TX_GAS_LIMIT) * U256::from(TX_GAS_PRICE);
+        let transaction = ZKsyncTx::builder()
+            .base(
+                TxEnv::builder()
+                    .tx_type(Some(L1_PRIORITY_TRANSACTION_TYPE))
+                    .caller(CALLER)
+                    .kind(TxKind::Call(TARGET))
+                    .gas_limit(TX_GAS_LIMIT)
+                    .gas_price(TX_GAS_PRICE),
+            )
+            .mint(mint)
+            .refund_recipient(Some(REFUND_RECIPIENT))
+            .tx_hash(tx_hash)
+            .build_fill()
+            .expect("transaction builds");
+        evm.transact(transaction).expect("transaction runs");
+        evm.0.ctx.journaled_state.take_l2_to_l1_logs()
+    }
+
+    #[test]
+    fn l1_result_log_follows_the_fee_and_refund_logs() {
+        let tx_hash = B256::from([0x11; 32]);
+
+        let logs = run_priority_transaction(tx_hash);
+
+        let (result_log, fee_logs) = logs.split_last().expect("the transaction emits logs");
+        assert_eq!(result_log.key, tx_hash);
+        assert!(
+            !fee_logs.is_empty(),
+            "the fee and refund steps must emit a log"
+        );
+        assert!(
+            fee_logs
+                .iter()
+                .all(|log| log.sender == L1_MESSENGER_ADDRESS)
+        );
     }
 }
