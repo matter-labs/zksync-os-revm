@@ -12,9 +12,8 @@ use revm::{
         Precompiles, blake2, bls12_381, bn254, hash, identity, kzg_point_evaluation, modexp,
         secp256k1, secp256r1,
     },
-    primitives::{Address, OnceLock},
+    primitives::{Address, AddressSet, OnceLock},
 };
-use std::boxed::Box;
 use std::string::String;
 
 pub mod calldata_view;
@@ -97,6 +96,8 @@ pub struct ZKsyncPrecompiles {
     inner: EthPrecompiles,
     /// Spec id of the precompile provider.
     spec: ZkSpecId,
+    /// Addresses warmed at the start of a transaction for the active spec.
+    warm_addresses: &'static AddressSet,
 }
 
 impl ZKsyncPrecompiles {
@@ -151,12 +152,33 @@ impl ZKsyncPrecompiles {
             }
         };
 
+        let warm_addresses = match spec {
+            ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => {
+                static WARM: OnceLock<AddressSet> = OnceLock::new();
+                WARM.get_or_init(|| {
+                    // Old versions did not warm the P256 precompile, but warmed
+                    // Blake2 (0x09) and Point Evaluation (0x0a) even though
+                    // they are not active precompiles.
+                    let mut warm: AddressSet = precompiles
+                        .addresses()
+                        .filter(|&&address| address != u64_to_address(P256VERIFY_ADDRESS))
+                        .copied()
+                        .collect();
+                    warm.insert(u64_to_address(9));
+                    warm.insert(u64_to_address(10));
+                    warm
+                })
+            }
+            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 => precompiles.addresses_set(),
+        };
+
         Self {
             inner: EthPrecompiles {
                 precompiles,
                 spec: spec.into_eth_spec(),
             },
             spec,
+            warm_addresses,
         }
     }
 
@@ -195,30 +217,8 @@ where
     }
 
     #[inline]
-    fn warm_addresses(&self) -> Box<impl Iterator<Item = Address>> {
-        let spec = self.spec;
-        // Historical versions warmed Blake2 (0x09) and Point Evaluation (0x0a)
-        // even though they are not active precompiles.
-        let extra = match spec {
-            ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => {
-                vec![u64_to_address(9), u64_to_address(10)]
-            }
-            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 => vec![],
-        };
-        Box::new(
-            self.inner
-                .warm_addresses()
-                .filter(move |x| {
-                    match spec {
-                        ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => {
-                            // Old versions did not warm P256 precompile, so we need to filter it out.
-                            *x != u64_to_address(P256VERIFY_ADDRESS)
-                        }
-                        ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 => true,
-                    }
-                })
-                .chain(extra),
-        )
+    fn warm_addresses(&self) -> &AddressSet {
+        self.warm_addresses
     }
 
     #[inline]
