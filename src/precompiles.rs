@@ -132,13 +132,17 @@ impl ZKsyncPrecompiles {
                     // AtlasV4 (ZKsync OS v0.4.0, Pectra + Fusaka) is the AtlasV1-V3
                     // base set plus the Pectra-era precompiles: BLAKE2F (0x09),
                     // point evaluation (0x0a), and BLS12-381 EIP-2537 (0x0b-0x11).
+                    //
+                    // MODEXP carries the Osaka rules, which ZKsync OS v0.4.0
+                    // applies: the EIP-7883 gas schedule and the EIP-7823 cap of
+                    // 1024 bytes on the base and the modulus.
                     let mut precompiles = Precompiles::default();
                     precompiles.extend([
                         secp256k1::ECRECOVER,
                         hash::SHA256,
                         hash::RIPEMD160,
                         identity::FUN,
-                        modexp::BERLIN,
+                        modexp::OSAKA,
                         bn254::add::ISTANBUL,
                         bn254::mul::ISTANBUL,
                         bn254::pair::ISTANBUL,
@@ -230,5 +234,47 @@ where
 impl Default for ZKsyncPrecompiles {
     fn default() -> Self {
         Self::new_with_spec(ZkSpecId::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// MODEXP carries the Osaka gas schedule on AtlasV4 and the Berlin schedule
+    /// on the earlier specs. EIP-7883 raises the floor from 200 to 500, so a
+    /// minimal exponentiation shows which schedule a spec applies.
+    #[test]
+    fn modexp_gas_schedule_follows_the_spec() {
+        // Lengths of one byte each, then the base, the exponent and the modulus.
+        let mut input = [0u8; 99];
+        input[31] = 1;
+        input[63] = 1;
+        input[95] = 1;
+        input[96] = 8;
+        input[97] = 9;
+        input[98] = 10;
+
+        let address = u64_to_address(5);
+        let gas_of = |spec: ZkSpecId| {
+            ZKsyncPrecompiles::new_with_spec(spec)
+                .precompiles()
+                .get(&address)
+                .expect("every supported spec holds MODEXP")
+                .execute(&input, 100_000, 0)
+                .expect("a minimal exponentiation succeeds")
+                .gas_used
+        };
+
+        assert_eq!(
+            gas_of(ZkSpecId::AtlasV3),
+            200,
+            "AtlasV3 prices MODEXP at Berlin"
+        );
+        assert_eq!(
+            gas_of(ZkSpecId::AtlasV4),
+            500,
+            "AtlasV4 prices MODEXP at EIP-7883"
+        );
     }
 }
