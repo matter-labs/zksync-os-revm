@@ -23,7 +23,7 @@ use revm::{
     },
     inspector::{Inspector, InspectorEvmTr, InspectorHandler},
     interpreter::{
-        CallOutcome, Gas, InitialAndFloorGas, InstructionResult, InterpreterResult,
+        CallOutcome, Gas, GasTracker, InitialAndFloorGas, InstructionResult, InterpreterResult,
         interpreter::EthInterpreter, interpreter_action::FrameInit,
     },
     primitives::{Bytes, U256},
@@ -71,7 +71,11 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
         }
     }
 
-    fn forced_fail_execution_result(&mut self, evm: &mut EVM) -> Result<FrameResult, ERROR>
+    fn forced_fail_execution_result(
+        &mut self,
+        evm: &mut EVM,
+        tx_gas: &mut GasTracker,
+    ) -> Result<FrameResult, ERROR>
     where
         EVM: EvmTr<Frame = FRAME>,
         EVM::Context: ZkContextTr + ContextSetters,
@@ -96,7 +100,7 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
         let ir = InterpreterResult::new(
             InstructionResult::Revert,
             Default::default(),
-            Gas::new_spent(0),
+            Gas::new_spent_with_reservoir(0, 0),
         );
         let mut frame_result = FrameResult::Call(CallOutcome::new(ir, 0..0));
 
@@ -106,11 +110,11 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
         let used = gas_used.min(gas_limit);
         let unused = gas_limit - used;
         let gas = frame_result.gas_mut();
-        *gas = Gas::new_spent(gas_limit);
+        *gas = Gas::new_spent_with_reservoir(gas_limit, 0);
         gas.erase_cost(unused);
 
         // Normalize as a regular top-level frame return.
-        self.last_frame_result(evm, &mut frame_result)?;
+        self.last_frame_result(evm, &mut frame_result, tx_gas)?;
         Ok(frame_result)
     }
 
@@ -190,13 +194,17 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
         let mut gas = revm::context_interface::cfg::gas::calculate_initial_tx_gas_for_tx(
             tx,
             spec_id.into_eth_spec(),
+            None,
         );
         if is_eip7623_disabled {
             gas.floor_gas = 0;
         }
         let gas_limit = tx.gas_limit();
-        gas.initial_total_gas = gas.initial_total_gas.min(gas_limit);
-        gas.initial_state_gas = gas.initial_state_gas.min(gas.initial_total_gas);
+        // Clamp the total intrinsic gas to the tx gas limit, letting state gas
+        // keep as much of the budget as possible (regular gas absorbs the cut).
+        let total = gas.initial_total_gas().min(gas_limit);
+        gas.initial_state_gas = gas.initial_state_gas.min(total);
+        gas.initial_regular_gas = total - gas.initial_state_gas;
         gas.floor_gas = gas.floor_gas.min(gas_limit);
         gas
     }
@@ -322,13 +330,19 @@ where
             ));
 
         let mut handler = Self::new();
-        let execution_result = handler.execution(evm, &InitialAndFloorGas::new(0, 0));
+        // Mirrors `Handler::run_system_call`: no intrinsic gas, and the
+        // checkpoint that `execution` settles is opened here since
+        // pre-execution is skipped.
+        let init_and_floor_gas = InitialAndFloorGas::new(0, 0);
+        let mut gas = handler.tx_gas(evm, &init_and_floor_gas);
+        let checkpoint = evm.ctx().journal_mut().checkpoint();
+        let execution_result = handler.execution(evm, checkpoint, &mut gas);
         evm.ctx().set_tx(original_tx);
         evm.ctx().local_mut().clear();
         evm.frame_stack().clear();
 
         let frame_result = execution_result?;
-        if frame_result.interpreter_result().result.is_ok() {
+        if frame_result.is_some_and(|result| result.instruction_result().is_ok()) {
             return Ok(());
         }
 
@@ -389,12 +403,24 @@ where
         let is_relaxed_l1 =
             Self::l1_tx_accounting_mode(tx, spec_id) == Some(L1TxAccountingMode::AtlasV3);
 
+        // Mirrors the upstream default implementation. EIP-2780 is part of
+        // Amsterdam and thus never active for ZK specs (they map to Osaka at most).
+        let eip2780 = ctx.cfg().is_amsterdam_eip2780_enabled().then(|| {
+            // Self-transfer: a `Call` whose recipient is the sender itself.
+            let is_self_transfer = tx.kind().to() == Some(&tx.caller());
+            revm::context_interface::cfg::gas_params::Eip2780TxInfo {
+                value: tx.value(),
+                is_self_transfer,
+            }
+        });
+
         let validated = revm::handler::validation::validate_initial_tx_gas(
             tx,
             spec_id.into_eth_spec(),
             is_eip7623_disabled,
             ctx.cfg().is_amsterdam_eip8037_enabled(),
             ctx.cfg().tx_gas_limit_cap(),
+            eip2780,
         );
 
         match validated {
@@ -439,13 +465,16 @@ where
 
             // Rewrite the Gas object to match ZKsync OS usage.
             let gas = exec_result.gas_mut();
-            *gas = Gas::new_spent(gas_limit);
+            *gas = Gas::new_spent_with_reservoir(gas_limit, 0);
             gas.erase_cost(unused);
             // IMPORTANT: ignore EVM-native refunds: (do NOT call `gas.record_refund(...)` here)
             //    self.refund(evm, exec_result, eip7702_gas_refund);  // <-- intentionally NOT called
 
-            let result_gas =
-                post_execution::build_result_gas(exec_result.gas(), init_and_floor_gas);
+            let result_gas = post_execution::build_result_gas(
+                exec_result.instruction_result().is_halt(),
+                exec_result.gas(),
+                init_and_floor_gas,
+            );
 
             // Reimburse sender and reward beneficiary using the rewritten Gas.
             if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
@@ -459,9 +488,12 @@ where
             if ZkSpecId::AtlasV3.is_enabled_in(evm.ctx().cfg().spec()) {
                 self.notify_l2_asset_tracker(evm, exec_result)?;
             }
-            self.refund(evm, exec_result, eip7702_gas_refund);
-            let result_gas =
-                post_execution::build_result_gas(exec_result.gas(), init_and_floor_gas);
+            self.refund(evm, exec_result, eip7702_gas_refund)?;
+            let result_gas = post_execution::build_result_gas(
+                exec_result.instruction_result().is_halt(),
+                exec_result.gas(),
+                init_and_floor_gas,
+            );
             self.eip7623_check_gas_floor(evm, exec_result, init_and_floor_gas);
             self.reimburse_caller(evm, exec_result)?;
             self.reward_beneficiary(evm, exec_result)?;
@@ -472,21 +504,26 @@ where
     fn execution(
         &mut self,
         evm: &mut Self::Evm,
-        init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<FrameResult, Self::Error> {
+        checkpoint: JournalCheckpoint,
+        gas: &mut GasTracker,
+    ) -> Result<Option<FrameResult>, Self::Error> {
         if evm.ctx().tx().force_fail() {
-            return self.forced_fail_execution_result(evm);
+            // The forced failure skips the first frame entirely; keep the
+            // pre-execution state changes as a successful frame init would.
+            evm.ctx().journal_mut().checkpoint_commit();
+            return Ok(Some(self.forced_fail_execution_result(evm, gas)?));
         }
 
-        let (gas_limit, reservoir) = init_and_floor_gas.initial_gas_and_reservoir(
-            evm.ctx().tx().gas_limit(),
-            evm.ctx().cfg().tx_gas_limit_cap(),
-            evm.ctx().cfg().is_amsterdam_eip8037_enabled(),
-        );
-        let first_frame_input = self.first_frame_input(evm, gas_limit, reservoir)?;
+        let Some(first_frame_input) = self.first_frame_input(evm, gas)? else {
+            revm::handler::execution::runtime_oog_unwind(evm.ctx(), checkpoint)?;
+            return Ok(None);
+        };
+        // The runtime gas phase is complete: commit its state changes.
+        evm.ctx().journal_mut().checkpoint_commit();
+
         let mut frame_result = self.run_exec_loop(evm, first_frame_input)?;
-        self.last_frame_result(evm, &mut frame_result)?;
-        Ok(frame_result)
+        self.last_frame_result(evm, &mut frame_result, gas)?;
+        Ok(Some(frame_result))
     }
 
     fn validate_against_state_and_deduct_caller(
@@ -759,20 +796,25 @@ where
     fn inspect_execution(
         &mut self,
         evm: &mut Self::Evm,
-        init_and_floor_gas: &InitialAndFloorGas,
-    ) -> Result<FrameResult, Self::Error> {
+        checkpoint: JournalCheckpoint,
+        gas: &mut GasTracker,
+    ) -> Result<Option<FrameResult>, Self::Error> {
         if evm.ctx().tx().force_fail() {
-            return self.forced_fail_execution_result(evm);
+            // The forced failure skips the first frame entirely; keep the
+            // pre-execution state changes as a successful frame init would.
+            evm.ctx().journal_mut().checkpoint_commit();
+            return Ok(Some(self.forced_fail_execution_result(evm, gas)?));
         }
 
-        let (gas_limit, reservoir) = init_and_floor_gas.initial_gas_and_reservoir(
-            evm.ctx().tx().gas_limit(),
-            evm.ctx().cfg().tx_gas_limit_cap(),
-            evm.ctx().cfg().is_amsterdam_eip8037_enabled(),
-        );
-        let first_frame_input = self.first_frame_input(evm, gas_limit, reservoir)?;
+        let Some(first_frame_input) = self.first_frame_input(evm, gas)? else {
+            revm::handler::execution::runtime_oog_unwind(evm.ctx(), checkpoint)?;
+            return Ok(None);
+        };
+        // The runtime gas phase is complete: commit its state changes.
+        evm.ctx().journal_mut().checkpoint_commit();
+
         let mut frame_result = self.inspect_run_exec_loop(evm, first_frame_input)?;
-        self.last_frame_result(evm, &mut frame_result)?;
-        Ok(frame_result)
+        self.last_frame_result(evm, &mut frame_result, gas)?;
+        Ok(Some(frame_result))
     }
 }
