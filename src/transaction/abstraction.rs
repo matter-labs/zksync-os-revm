@@ -36,6 +36,16 @@ pub trait ZkTxTr: Transaction {
     fn is_service_tx(&self) -> bool {
         self.tx_type() == SERVICE_TRANSACTION_TYPE
     }
+
+    /// The transaction's identity hash — used for the bootloader result L2→L1
+    /// log and the block header's transactions rolling hash.
+    ///
+    /// A consumer that re-executes a witnessed transaction inside a proof must
+    /// authenticate this against the preimage — `keccak256(signed_bytes) ==
+    /// tx_hash` (L2) or `keccak256(abi_encoded) == tx_hash` (L1/upgrade/system)
+    /// — before committing to it, or second-prover soundness breaks. See
+    /// `zksync-os-zisk`'s `build_proven_tx`.
+    fn tx_hash(&self) -> B256;
 }
 
 /// ZKsync OS transaction.
@@ -62,10 +72,12 @@ impl<T: Transaction> AsRef<T> for ZKsyncTx<T> {
 
 impl<T: Transaction> ZKsyncTx<T> {
     /// Create a new ZKsync OS transaction.
-    pub fn new(base: T) -> Self {
+    ///
+    /// The identity hash is a required parameter. See [`ZkTxTr::tx_hash`].
+    pub fn new(base: T, tx_hash: B256) -> Self {
         Self {
             base,
-            l1_to_l2_part: L1ToL2TransactionParts::default(),
+            l1_to_l2_part: L1ToL2TransactionParts::new(None, None, None, tx_hash),
             gas_used_override: None,
             force_fail: false,
             service_tx: false,
@@ -80,29 +92,19 @@ impl ZKsyncTx<TxEnv> {
     }
 }
 
-impl Default for ZKsyncTx<TxEnv> {
-    fn default() -> Self {
-        Self {
-            base: TxEnv::default(),
-            l1_to_l2_part: L1ToL2TransactionParts::default(),
-            gas_used_override: None,
-            force_fail: false,
-            service_tx: false,
-        }
-    }
-}
-
 impl<TX: Transaction + SystemCallTx> SystemCallTx for ZKsyncTx<TX> {
     fn new_system_tx_with_caller(
         caller: Address,
         system_contract_address: Address,
         data: Bytes,
     ) -> Self {
-        ZKsyncTx::new(TX::new_system_tx_with_caller(
-            caller,
-            system_contract_address,
-            data,
-        ))
+        // A system call is not a block transaction: it stays out of the
+        // transactions rolling hash and emits no result L2→L1 log, so it holds
+        // no identity hash.
+        ZKsyncTx::new(
+            TX::new_system_tx_with_caller(caller, system_contract_address, data),
+            B256::ZERO,
+        )
     }
 }
 
@@ -213,9 +215,16 @@ impl<T: Transaction> ZkTxTr for ZKsyncTx<T> {
     fn is_service_tx(&self) -> bool {
         self.service_tx || self.tx_type() == SERVICE_TRANSACTION_TYPE
     }
+
+    fn tx_hash(&self) -> B256 {
+        self.l1_to_l2_part.tx_hash
+    }
 }
 
-/// Builder for constructing [`ZKsyncTx`] instances
+/// Builder for constructing [`ZKsyncTx`] instances.
+///
+/// `tx_hash` is mandatory — call `.tx_hash(hash)` before `.build()` or
+/// `.build_fill()` (see [`ZkTxTr::tx_hash`]).
 #[derive(Default, Debug)]
 pub struct ZKsyncTxBuilder {
     base: TxEnvBuilder,
@@ -223,6 +232,7 @@ pub struct ZKsyncTxBuilder {
     gas_used_override: Option<u64>,
     force_fail: bool,
     service_tx: bool,
+    tx_hash_set: bool,
 }
 
 impl ZKsyncTxBuilder {
@@ -234,6 +244,7 @@ impl ZKsyncTxBuilder {
             gas_used_override: None,
             force_fail: false,
             service_tx: false,
+            tx_hash_set: false,
         }
     }
 
@@ -281,27 +292,47 @@ impl ZKsyncTxBuilder {
         self
     }
 
+    /// Set the transaction's identity hash. **Required** — both build methods
+    /// fail with [`ZkBuilderror::MissingTxHash`] without it. See
+    /// [`ZkTxTr::tx_hash`] for the authentication a proving consumer must
+    /// perform.
+    pub fn tx_hash(mut self, tx_hash: B256) -> Self {
+        self.l1_to_l2_part.tx_hash = tx_hash;
+        self.tx_hash_set = true;
+        self
+    }
+
     /// Build the [`ZKsyncTx`] with default values for missing fields.
     ///
     /// This is useful for testing and debugging where it is not necessary to
     /// have full [`ZKsyncTx`] instance.
     ///
     /// If the source hash is not [`B256::ZERO`], set the transaction type to L1 -> L2 part and remove the enveloped transaction.
-    pub fn build_fill(self) -> ZKsyncTx<TxEnv> {
+    ///
+    /// The transaction's identity hash is the one field without a default: it
+    /// keys the result L2→L1 log, so a filled-in [`B256::ZERO`] would corrupt
+    /// the message root of the block.
+    pub fn build_fill(self) -> Result<ZKsyncTx<TxEnv>, ZkBuilderror> {
+        if !self.tx_hash_set {
+            return Err(ZkBuilderror::MissingTxHash);
+        }
         let base = self.base.build_fill();
 
-        ZKsyncTx {
+        Ok(ZKsyncTx {
             base,
             l1_to_l2_part: self.l1_to_l2_part,
             gas_used_override: self.gas_used_override,
             force_fail: self.force_fail,
             service_tx: self.service_tx,
-        }
+        })
     }
 
     /// Build the [`ZKsyncTx`] instance, return error if the transaction is not valid.
     ///
     pub fn build(self) -> Result<ZKsyncTx<TxEnv>, ZkBuilderror> {
+        if !self.tx_hash_set {
+            return Err(ZkBuilderror::MissingTxHash);
+        }
         let base = self.base.build()?;
 
         Ok(ZKsyncTx {
@@ -321,6 +352,8 @@ impl ZKsyncTxBuilder {
 pub enum ZkBuilderror {
     /// Base transaction build error
     Base(TxEnvBuildError),
+    /// The transaction's identity hash is absent
+    MissingTxHash,
 }
 
 impl From<TxEnvBuildError> for ZkBuilderror {
@@ -345,6 +378,7 @@ mod tests {
         let zk_tx = ZKsyncTx::builder()
             .base(base_tx)
             .mint(U256::ZERO)
+            .tx_hash(B256::ZERO)
             .build()
             .unwrap();
         // Verify transaction type (deposit transactions should have tx_type based on ZkSpecId)
@@ -358,9 +392,65 @@ mod tests {
     }
 
     #[test]
+    fn test_build_without_tx_hash_returns_error() {
+        assert_eq!(
+            ZKsyncTx::builder().build(),
+            Err(ZkBuilderror::MissingTxHash)
+        );
+        assert_eq!(
+            ZKsyncTx::builder().build_fill(),
+            Err(ZkBuilderror::MissingTxHash)
+        );
+    }
+
+    #[test]
+    fn test_new_carries_the_tx_hash_the_caller_writes() {
+        let tx_hash = B256::from([0x22; 32]);
+        let tx = ZKsyncTx::new(TxEnv::default(), tx_hash);
+
+        assert_eq!(tx.tx_hash(), tx_hash);
+        assert_eq!(
+            tx.l1_to_l2_part,
+            L1ToL2TransactionParts::new(None, None, None, tx_hash)
+        );
+    }
+
+    #[test]
+    fn test_explicit_zero_tx_hash_reaches_the_transaction() {
+        let from_new = ZKsyncTx::new(TxEnv::default(), B256::ZERO);
+        let from_build = ZKsyncTx::builder().tx_hash(B256::ZERO).build().unwrap();
+        let from_build_fill = ZKsyncTx::builder()
+            .tx_hash(B256::ZERO)
+            .build_fill()
+            .unwrap();
+
+        assert_eq!(from_new.tx_hash(), B256::ZERO);
+        assert_eq!(from_build.tx_hash(), B256::ZERO);
+        assert_eq!(from_build_fill.tx_hash(), B256::ZERO);
+    }
+
+    #[test]
+    fn test_system_call_tx_holds_no_identity_hash() {
+        let tx = <ZKsyncTx<TxEnv> as SystemCallTx>::new_system_tx_with_caller(
+            Address::ZERO,
+            Address::ZERO,
+            Bytes::new(),
+        );
+
+        // The zero hash is safe only while the system call stays outside the
+        // block's transaction list and emits no result L2→L1 log.
+        assert_eq!(tx.tx_hash(), B256::ZERO);
+        assert!(!tx.is_l1_to_l2_tx());
+        assert_ne!(tx.tx_type(), L1_PRIORITY_TRANSACTION_TYPE);
+    }
+
+    #[test]
     fn test_service_tx_default_is_false() {
-        let tx_from_build = ZKsyncTx::builder().build().unwrap();
-        let tx_from_build_fill = ZKsyncTx::builder().build_fill();
+        let tx_from_build = ZKsyncTx::builder().tx_hash(B256::ZERO).build().unwrap();
+        let tx_from_build_fill = ZKsyncTx::builder()
+            .tx_hash(B256::ZERO)
+            .build_fill()
+            .unwrap();
 
         assert!(!tx_from_build.service_tx);
         assert!(!tx_from_build_fill.service_tx);
@@ -368,8 +458,16 @@ mod tests {
 
     #[test]
     fn test_service_tx_builder_persists_to_build_and_build_fill() {
-        let tx_from_build = ZKsyncTx::builder().service_tx(true).build().unwrap();
-        let tx_from_build_fill = ZKsyncTx::builder().service_tx(true).build_fill();
+        let tx_from_build = ZKsyncTx::builder()
+            .service_tx(true)
+            .tx_hash(B256::ZERO)
+            .build()
+            .unwrap();
+        let tx_from_build_fill = ZKsyncTx::builder()
+            .service_tx(true)
+            .tx_hash(B256::ZERO)
+            .build_fill()
+            .unwrap();
 
         assert!(tx_from_build.service_tx);
         assert!(tx_from_build_fill.service_tx);
@@ -379,7 +477,11 @@ mod tests {
 
     #[test]
     fn test_service_tx_serde_compatibility_and_roundtrip() {
-        let tx = ZKsyncTx::builder().service_tx(true).build_fill();
+        let tx = ZKsyncTx::builder()
+            .service_tx(true)
+            .tx_hash(B256::ZERO)
+            .build_fill()
+            .unwrap();
         let serialized = serde_json::to_value(&tx).expect("serialize tx");
 
         let mut legacy_like = serialized.clone();
@@ -399,10 +501,35 @@ mod tests {
     }
 
     #[test]
+    fn test_tx_hash_serde_compatibility_and_roundtrip() {
+        let tx_hash = B256::from([0x11; 32]);
+        let tx = ZKsyncTx::builder().tx_hash(tx_hash).build_fill().unwrap();
+        let serialized = serde_json::to_value(&tx).expect("serialize tx");
+
+        let mut legacy_like = serialized.clone();
+        let removed = legacy_like
+            .get_mut("l1_to_l2_part")
+            .and_then(Value::as_object_mut)
+            .expect("serialized tx must hold the L1 -> L2 part")
+            .remove("tx_hash");
+        assert!(removed.is_some(), "serialized tx must hold the tx hash");
+
+        let deserialized_legacy: ZKsyncTx<TxEnv> =
+            serde_json::from_value(legacy_like).expect("deserialize legacy tx");
+        assert_eq!(deserialized_legacy.tx_hash(), B256::ZERO);
+
+        let roundtrip: ZKsyncTx<TxEnv> =
+            serde_json::from_value(serialized).expect("deserialize roundtrip tx");
+        assert_eq!(roundtrip.tx_hash(), tx_hash);
+    }
+
+    #[test]
     fn test_service_tx_type_implies_service_semantics_without_aux_flag() {
         let tx = ZKsyncTx::builder()
             .base(TxEnv::builder().tx_type(Some(SERVICE_TRANSACTION_TYPE)))
-            .build_fill();
+            .tx_hash(B256::ZERO)
+            .build_fill()
+            .unwrap();
 
         assert!(!tx.service_tx);
         assert!(tx.is_service_tx());

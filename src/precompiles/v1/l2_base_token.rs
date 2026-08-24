@@ -23,7 +23,9 @@ pub const WITHDRAW_WITH_MESSAGE_SELECTOR: &[u8] = &[0x84, 0xbc, 0x3e, 0xb0];
 pub const FINALIZE_ETH_WITHDRAWAL_SELECTOR: &[u8] = &[0x6c, 0x09, 0x60, 0xf9];
 
 /// Run the L2 base token precompile.
-pub fn l2_base_token_precompile_call<CTX: ContextTr>(
+pub fn l2_base_token_precompile_call<
+    CTX: ContextTr<Journal: crate::l2_to_l1_logs::L2ToL1LogStore>,
+>(
     ctx: &mut CTX,
     inputs: &CallInputs,
     is_delegate: bool,

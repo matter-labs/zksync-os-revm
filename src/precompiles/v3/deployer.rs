@@ -57,7 +57,7 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
 
             calldata = &calldata[4..];
 
-            let (address, bytecode_hash, bytecode_length) =
+            let (address, observable_bytecode_hash, bytecode_length) =
                 match set_bytecode_on_address_parse_calldata(calldata, gas) {
                     Ok(x) => x,
                     Err(early_return) => return early_return,
@@ -66,7 +66,13 @@ pub fn deployer_precompile_call<CTX: ContextTr>(
             // finished reading calldata, release borrow before mutating context
             drop(view);
 
-            set_bytecode_on_address_internal(ctx, address, bytecode_hash, bytecode_length, gas)
+            set_bytecode_on_address_internal(
+                ctx,
+                address,
+                observable_bytecode_hash,
+                bytecode_length,
+                gas,
+            )
         }
         _ => revert(gas),
     }

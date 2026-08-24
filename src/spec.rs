@@ -47,6 +47,24 @@ impl ZkSpecId {
     pub const fn is_enabled_in(self, other: ZkSpecId) -> bool {
         self as u8 <= other as u8
     }
+
+    /// Whether EIP-7702 (set-code txs) is enabled. `AtlasV3` is "Cancun + 7702":
+    /// the eth spec stays Cancun (see [`Self::into_eth_spec`]); this only adds 7702.
+    pub const fn supports_eip7702(self) -> bool {
+        ZkSpecId::AtlasV3.is_enabled_in(self)
+    }
+
+    /// Whether the handler must take the EIP-7702 rules from Prague.
+    ///
+    /// The eth spec of `AtlasV3` is Cancun, which rejects set-code
+    /// transactions and prices an authorization list at zero. The handler
+    /// therefore admits the transaction, meters the intrinsic gas and applies
+    /// the authorization refund under Prague, and holds the EIP-7623 calldata
+    /// floor off. A spec whose eth spec already reaches Prague gets those
+    /// rules from revm.
+    pub const fn borrows_eip7702_from_prague(self) -> bool {
+        self.supports_eip7702() && !self.into_eth_spec().is_enabled_in(SpecId::PRAGUE)
+    }
 }
 
 impl From<ZkSpecId> for SpecId {
