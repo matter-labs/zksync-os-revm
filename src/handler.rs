@@ -1031,6 +1031,7 @@ mod tests {
         );
 
         let mut evm = zk_context(database, ZkSpecId::AtlasV3).build_zk();
+        evm.0.ctx.journaled_state.set_tx_number(0);
         // The mint equals the prepaid fee, so there is no upfront transfer.
         let mint = U256::from(TX_GAS_LIMIT) * U256::from(TX_GAS_PRICE);
         let transaction = ZKsyncTx::builder()

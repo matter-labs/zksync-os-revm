@@ -47,23 +47,49 @@ pub struct ZkJournal<DB> {
     log_count_at_transaction_start: usize,
     /// Number of the transaction in the block, recorded in every log.
     tx_number: u16,
+    /// Whether [`Self::set_tx_number`] has run for the transaction in progress.
+    /// Each transaction boundary clears it, so the number cannot carry over
+    /// from the transaction before.
+    tx_number_set: bool,
 }
 
 impl<DB> ZkJournal<DB> {
     /// Set the number of the transaction in the block. Call before each transaction.
+    ///
+    /// The number reaches L1 inside every log of the transaction
+    /// (`tx_number_in_block`), so it feeds the L2→L1 rolling hash and the
+    /// message tree. Zero is the number of the first transaction and cannot
+    /// double as "unset", which is why a separate flag guards it.
     pub fn set_tx_number(&mut self, tx_number: u16) {
         self.tx_number = tx_number;
+        self.tx_number_set = true;
     }
 
     /// Take the L2→L1 logs of the transaction.
     pub fn take_l2_to_l1_logs(&mut self) -> Vec<L2ToL1Log> {
+        debug_assert!(
+            self.open_checkpoint_log_counts.is_empty(),
+            "the logs of a transaction are taken at its boundary, with no checkpoint open",
+        );
         self.log_count_at_transaction_start = 0;
         core::mem::take(&mut self.l2_to_l1_logs)
+    }
+
+    /// Drop the L2→L1 state of the transaction in progress.
+    fn reset_transaction_logs(&mut self) {
+        self.l2_to_l1_logs.clear();
+        self.open_checkpoint_log_counts.clear();
+        self.log_count_at_transaction_start = 0;
+        self.tx_number_set = false;
     }
 }
 
 impl<DB> L2ToL1LogStore for ZkJournal<DB> {
     fn push_l2_to_l1_log(&mut self, sender: Address, key: B256, value: B256) {
+        assert!(
+            self.tx_number_set,
+            "set_tx_number must run for the transaction that emits an L2->L1 log",
+        );
         self.l2_to_l1_logs.push(L2ToL1Log {
             l2_shard_id: 0,
             is_service: true,
@@ -95,6 +121,7 @@ impl<DB: Database> JournalTr for ZkJournal<DB> {
             open_checkpoint_log_counts: Vec::new(),
             log_count_at_transaction_start: 0,
             tx_number: 0,
+            tx_number_set: false,
         }
     }
 
@@ -153,6 +180,7 @@ impl<DB: Database> JournalTr for ZkJournal<DB> {
         // The logs stay pending until the caller takes them.
         self.open_checkpoint_log_counts.clear();
         self.log_count_at_transaction_start = self.l2_to_l1_logs.len();
+        self.tx_number_set = false;
         self.inner.commit_tx()
     }
 
@@ -162,7 +190,19 @@ impl<DB: Database> JournalTr for ZkJournal<DB> {
         self.l2_to_l1_logs
             .truncate(self.log_count_at_transaction_start);
         self.log_count_at_transaction_start = self.l2_to_l1_logs.len();
+        self.tx_number_set = false;
         self.inner.discard_tx()
+    }
+
+    /// Clear the residue of the transaction in progress, L2→L1 logs included.
+    ///
+    /// The trait default reaches [`Self::finalize`], which owns the EVM state
+    /// alone. A caller that resets this way has not taken the logs, so they are
+    /// residue of the same transaction and go with it.
+    #[inline]
+    fn clear(&mut self) {
+        self.reset_transaction_logs();
+        let _ = self.finalize();
     }
 
     #[inline]
@@ -576,6 +616,7 @@ mod tests {
         entry: Address,
     ) -> Vec<L2ToL1Log> {
         let mut evm = zk_context(database(accounts), spec).build_zk();
+        evm.0.ctx.journaled_state.set_tx_number(0);
         let transaction = ZKsyncTx::builder()
             .base(
                 TxEnv::builder()
@@ -598,6 +639,7 @@ mod tests {
         entry: Address,
     ) -> Vec<L2ToL1Log> {
         let mut evm = zk_context(database(accounts), spec).build_zk();
+        evm.0.ctx.journaled_state.set_tx_number(0);
         let transaction = ZKsyncTx::builder()
             .base(
                 TxEnv::builder()
@@ -610,6 +652,7 @@ mod tests {
             .expect("transaction builds");
         evm.transact(transaction).expect("transaction runs");
 
+        evm.0.ctx.journaled_state.set_tx_number(1);
         // The caller holds no funds, so the handler rejects the transaction.
         let rejected = ZKsyncTx::builder()
             .base(
@@ -745,5 +788,35 @@ mod tests {
             assert_eq!(logs.len(), 1, "{spec:?}");
             assert_eq!(logs[0].value, keccak256(SECOND_MESSAGE), "{spec:?}");
         }
+    }
+
+    /// Zero is a valid transaction number, so an unset number cannot be told
+    /// from the first transaction by value alone.
+    #[test]
+    #[should_panic(expected = "set_tx_number must run")]
+    fn a_log_without_a_transaction_number_is_refused() {
+        let mut journal = ZkJournal::new(database(&[]));
+        journal.push_l2_to_l1_log(CALLER, B256::ZERO, B256::ZERO);
+    }
+
+    /// The number of one transaction must not reach the logs of the next: two
+    /// logs claiming one transaction diverge from the message tree of ZKsync OS.
+    #[test]
+    #[should_panic(expected = "set_tx_number must run")]
+    fn the_transaction_number_does_not_carry_over_a_boundary() {
+        let mut journal = ZkJournal::new(database(&[]));
+        journal.set_tx_number(0);
+        journal.push_l2_to_l1_log(CALLER, B256::ZERO, B256::ZERO);
+        journal.commit_tx();
+        journal.push_l2_to_l1_log(CALLER, B256::ZERO, B256::ZERO);
+    }
+
+    #[test]
+    fn clear_drops_the_pending_l2_to_l1_logs() {
+        let mut journal = ZkJournal::new(database(&[]));
+        journal.set_tx_number(0);
+        journal.push_l2_to_l1_log(CALLER, B256::ZERO, B256::ZERO);
+        journal.clear();
+        assert!(journal.take_l2_to_l1_logs().is_empty());
     }
 }
