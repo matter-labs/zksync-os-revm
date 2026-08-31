@@ -42,7 +42,7 @@ fn maybe_call_custom_precompile<CTX>(
 ) -> Option<InterpreterResult>
 where
     CTX: ContextTr,
-    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore,
+    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore + crate::force_deploy::ForceDeployRecorder,
 {
     let precompile_address = inputs.bytecode_address;
 
@@ -200,7 +200,7 @@ impl ZKsyncPrecompiles {
 impl<CTX> PrecompileProvider<CTX> for ZKsyncPrecompiles
 where
     CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
-    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore,
+    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore + crate::force_deploy::ForceDeployRecorder,
 {
     type Output = InterpreterResult;
 
