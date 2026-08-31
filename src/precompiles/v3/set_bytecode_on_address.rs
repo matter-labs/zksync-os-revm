@@ -1,3 +1,4 @@
+use crate::force_deploy::ForceDeployRecorder;
 use crate::precompiles::calldata_view::CalldataView;
 use crate::precompiles::utils::{oog_error, revert};
 use crate::precompiles::v3::common::{
@@ -21,7 +22,7 @@ pub const SET_BYTECODE_ON_ADDRESS_HOOK_ADDRESS: Address =
     address!("0000000000000000000000000000000000007002");
 
 /// Run the set-bytecode-on-address precompile.
-pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr>(
+pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr<Journal: ForceDeployRecorder>>(
     ctx: &mut CTX,
     inputs: &CallInputs,
     is_delegate: bool,
@@ -94,13 +95,17 @@ pub fn set_bytecode_on_address_parse_calldata(
     Ok((address, observable_bytecode_hash, bytecode_length))
 }
 
-pub fn set_bytecode_on_address_internal<CTX: ContextTr>(
+pub fn set_bytecode_on_address_internal<CTX>(
     ctx: &mut CTX,
     address: Address,
     observable_bytecode_hash: B256,
     bytecode_length: u32,
     mut gas: Gas,
-) -> InterpreterResult {
+) -> InterpreterResult
+where
+    CTX: ContextTr,
+    CTX::Journal: crate::force_deploy::ForceDeployRecorder,
+{
     // Charge extra gas for `set_bytecode_details`
     let extra_gas = set_bytecode_details_extra_gas(bytecode_length as u64);
     if !gas.record_regular_cost(extra_gas) {
@@ -138,5 +143,7 @@ pub fn set_bytecode_on_address_internal<CTX: ContextTr>(
         .load_account(address)
         .expect("load_account");
     ctx.journal_mut().set_code(address, bytecode_padded);
+    ctx.journal_mut()
+        .record_force_deploy(address, observable_bytecode_hash);
     InterpreterResult::new(InstructionResult::Stop, [].into(), gas)
 }

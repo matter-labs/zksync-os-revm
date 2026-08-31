@@ -1,3 +1,4 @@
+use crate::force_deploy::ForceDeployRecorder;
 use crate::precompiles::calldata_view::CalldataView;
 use crate::precompiles::utils::{oog_error, revert};
 use revm::interpreter::CallInputs;
@@ -28,7 +29,7 @@ pub fn deployer_precompile_call<CTX>(
 ) -> InterpreterResult
 where
     CTX: ContextTr,
-    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore,
+    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore + crate::force_deploy::ForceDeployRecorder,
 {
     let view = CalldataView::new(ctx, &inputs.input);
     let mut calldata = view.as_slice();
@@ -116,6 +117,8 @@ where
                 .load_account(address)
                 .expect("load_account");
             ctx.journal_mut().set_code(address, bytecode_padded);
+            ctx.journal_mut()
+                .record_force_deploy(address, observable_bytecode_hash);
             InterpreterResult::new(InstructionResult::Return, [].into(), gas)
         }
         _ => revert(gas),

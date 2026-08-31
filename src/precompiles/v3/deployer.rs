@@ -19,11 +19,15 @@ pub const L2_GENESIS_UPGRADE_ADDRESS: Address =
 pub const MAX_CODE_SIZE: usize = 0x6000;
 
 /// Run the deployer precompile.
-pub fn deployer_precompile_call<CTX: ContextTr>(
+pub fn deployer_precompile_call<CTX>(
     ctx: &mut CTX,
     inputs: &CallInputs,
     is_delegate: bool,
-) -> InterpreterResult {
+) -> InterpreterResult
+where
+    CTX: ContextTr,
+    CTX::Journal: crate::force_deploy::ForceDeployRecorder,
+{
     let view = CalldataView::new(ctx, &inputs.input);
     let mut calldata = view.as_slice();
     let caller = inputs.caller;

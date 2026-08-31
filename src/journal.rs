@@ -1,4 +1,5 @@
 //! Contains the [`ZkJournal`] type: the REVM journal extended with the L2→L1 log store.
+use crate::force_deploy::ForceDeployRecorder;
 use crate::l2_to_l1_logs::{L2ToL1Log, L2ToL1LogStore};
 use revm::{
     Journal,
@@ -40,11 +41,19 @@ pub struct ZkJournal<DB> {
     inner: Journal<DB>,
     /// L2→L1 logs of the transaction that survived every revert so far.
     l2_to_l1_logs: Vec<L2ToL1Log>,
-    /// Log count at the time each open checkpoint was taken, innermost last.
-    open_checkpoint_log_counts: Vec<usize>,
+    /// Force-deploy declarations of the transaction that survived every revert
+    /// so far, as (deployed address, declared observable bytecode hash).
+    force_deploys: Vec<(Address, B256)>,
+    /// Record counts (logs, force deploys) at the time each open checkpoint
+    /// was taken, innermost last.
+    open_checkpoint_record_counts: Vec<(usize, usize)>,
     /// Log count at the boundary of the transaction in progress. Logs below it
     /// belong to transactions that are complete, and no revert may drop them.
     log_count_at_transaction_start: usize,
+    /// Force-deploy count at the boundary of the transaction in progress.
+    /// Declarations below it belong to transactions that are complete, and no
+    /// revert may drop them.
+    force_deploy_count_at_transaction_start: usize,
     /// Number of the transaction in the block, recorded in every log.
     tx_number: u16,
     /// Whether [`Self::set_tx_number`] has run for the transaction in progress.
@@ -68,19 +77,37 @@ impl<DB> ZkJournal<DB> {
     /// Take the L2→L1 logs of the transaction.
     pub fn take_l2_to_l1_logs(&mut self) -> Vec<L2ToL1Log> {
         debug_assert!(
-            self.open_checkpoint_log_counts.is_empty(),
+            self.open_checkpoint_record_counts.is_empty(),
             "the logs of a transaction are taken at its boundary, with no checkpoint open",
         );
         self.log_count_at_transaction_start = 0;
         core::mem::take(&mut self.l2_to_l1_logs)
     }
 
-    /// Drop the L2→L1 state of the transaction in progress.
+    /// Drop the per-transaction state of the transaction in progress: the
+    /// L2→L1 logs and the force-deploy declarations alike.
     fn reset_transaction_logs(&mut self) {
         self.l2_to_l1_logs.clear();
-        self.open_checkpoint_log_counts.clear();
+        self.force_deploys.clear();
+        self.open_checkpoint_record_counts.clear();
         self.log_count_at_transaction_start = 0;
+        self.force_deploy_count_at_transaction_start = 0;
         self.tx_number_set = false;
+    }
+}
+
+impl<DB> ForceDeployRecorder for ZkJournal<DB> {
+    fn record_force_deploy(&mut self, address: Address, observable_bytecode_hash: B256) {
+        self.force_deploys.push((address, observable_bytecode_hash));
+    }
+
+    fn take_force_deploys(&mut self) -> Vec<(Address, B256)> {
+        debug_assert!(
+            self.open_checkpoint_record_counts.is_empty(),
+            "the force deploys of a transaction are taken at its boundary, with no checkpoint open",
+        );
+        self.force_deploy_count_at_transaction_start = 0;
+        core::mem::take(&mut self.force_deploys)
     }
 }
 
@@ -118,8 +145,10 @@ impl<DB: Database> JournalTr for ZkJournal<DB> {
         Self {
             inner: Journal::new(database),
             l2_to_l1_logs: Vec::new(),
-            open_checkpoint_log_counts: Vec::new(),
+            force_deploys: Vec::new(),
+            open_checkpoint_record_counts: Vec::new(),
             log_count_at_transaction_start: 0,
+            force_deploy_count_at_transaction_start: 0,
             tx_number: 0,
             tx_number_set: false,
         }
@@ -127,14 +156,14 @@ impl<DB: Database> JournalTr for ZkJournal<DB> {
 
     #[inline]
     fn checkpoint(&mut self) -> JournalCheckpoint {
-        self.open_checkpoint_log_counts
-            .push(self.l2_to_l1_logs.len());
+        self.open_checkpoint_record_counts
+            .push((self.l2_to_l1_logs.len(), self.force_deploys.len()));
         self.inner.checkpoint()
     }
 
     #[inline]
     fn checkpoint_commit(&mut self) {
-        self.open_checkpoint_log_counts.pop();
+        self.open_checkpoint_record_counts.pop();
         self.inner.checkpoint_commit()
     }
 
@@ -142,16 +171,17 @@ impl<DB: Database> JournalTr for ZkJournal<DB> {
     fn checkpoint_revert(&mut self, checkpoint: JournalCheckpoint) {
         // Every checkpoint pushes one log count, so the stack is never empty here.
         debug_assert!(
-            !self.open_checkpoint_log_counts.is_empty(),
+            !self.open_checkpoint_record_counts.is_empty(),
             "checkpoint revert without an open checkpoint"
         );
         // An empty stack means the caller reverts without a checkpoint: drop the
-        // logs of the transaction in progress, and keep the earlier ones.
-        let log_count = self
-            .open_checkpoint_log_counts
-            .pop()
-            .unwrap_or(self.log_count_at_transaction_start);
+        // records of the transaction in progress, and keep the earlier ones.
+        let (log_count, force_deploy_count) = self.open_checkpoint_record_counts.pop().unwrap_or((
+            self.log_count_at_transaction_start,
+            self.force_deploy_count_at_transaction_start,
+        ));
         self.l2_to_l1_logs.truncate(log_count);
+        self.force_deploys.truncate(force_deploy_count);
         self.inner.checkpoint_revert(checkpoint)
     }
 
@@ -163,14 +193,14 @@ impl<DB: Database> JournalTr for ZkJournal<DB> {
         balance: U256,
         spec_id: SpecId,
     ) -> Result<JournalCheckpoint, TransferError> {
-        self.open_checkpoint_log_counts
-            .push(self.l2_to_l1_logs.len());
+        self.open_checkpoint_record_counts
+            .push((self.l2_to_l1_logs.len(), self.force_deploys.len()));
         let checkpoint = self
             .inner
             .create_account_checkpoint(caller, address, balance, spec_id);
         if checkpoint.is_err() {
             // The inner journal closes the checkpoint it opened.
-            self.open_checkpoint_log_counts.pop();
+            self.open_checkpoint_record_counts.pop();
         }
         checkpoint
     }
@@ -178,18 +208,22 @@ impl<DB: Database> JournalTr for ZkJournal<DB> {
     #[inline]
     fn commit_tx(&mut self) {
         // The logs stay pending until the caller takes them.
-        self.open_checkpoint_log_counts.clear();
+        self.open_checkpoint_record_counts.clear();
         self.log_count_at_transaction_start = self.l2_to_l1_logs.len();
+        self.force_deploy_count_at_transaction_start = self.force_deploys.len();
         self.tx_number_set = false;
         self.inner.commit_tx()
     }
 
     #[inline]
     fn discard_tx(&mut self) {
-        self.open_checkpoint_log_counts.clear();
+        self.open_checkpoint_record_counts.clear();
         self.l2_to_l1_logs
             .truncate(self.log_count_at_transaction_start);
         self.log_count_at_transaction_start = self.l2_to_l1_logs.len();
+        self.force_deploys
+            .truncate(self.force_deploy_count_at_transaction_start);
+        self.force_deploy_count_at_transaction_start = self.force_deploys.len();
         self.tx_number_set = false;
         self.inner.discard_tx()
     }
@@ -464,6 +498,7 @@ mod tests {
     };
 
     const CALLER: Address = address!("0000000000000000000000000000000000000c0f");
+    const FORCE_DEPLOY_TARGET: Address = address!("000000000000000000000000000000000000beef");
     const UNFUNDED_CALLER: Address = address!("0000000000000000000000000000000000000d0f");
     const OUTER_CONTRACT: Address = address!("0000000000000000000000000000000000001111");
     const MESSAGE_SENDER_CONTRACT: Address = address!("0000000000000000000000000000000000002222");
@@ -818,5 +853,35 @@ mod tests {
         journal.push_l2_to_l1_log(CALLER, B256::ZERO, B256::ZERO);
         journal.clear();
         assert!(journal.take_l2_to_l1_logs().is_empty());
+    }
+
+    /// A discarded transaction's force deploys go with it. The guest pins the
+    /// declared observable hash for every address reported here, so a
+    /// declaration that no longer happened would pin a value for an account
+    /// native never touched.
+    #[test]
+    fn discard_tx_drops_the_force_deploys_of_that_transaction() {
+        let mut journal = ZkJournal::new(database(&[]));
+        journal.set_tx_number(0);
+        journal.record_force_deploy(CALLER, B256::ZERO);
+        journal.commit_tx();
+
+        journal.set_tx_number(1);
+        journal.record_force_deploy(FORCE_DEPLOY_TARGET, B256::repeat_byte(0xee));
+        journal.discard_tx();
+
+        // The committed transaction's declaration survives; the discarded
+        // transaction's does not.
+        assert_eq!(journal.take_force_deploys(), vec![(CALLER, B256::ZERO)]);
+    }
+
+    /// `clear` drops the transaction in progress whole, force deploys included.
+    #[test]
+    fn clear_drops_the_pending_force_deploys() {
+        let mut journal = ZkJournal::new(database(&[]));
+        journal.set_tx_number(0);
+        journal.record_force_deploy(CALLER, B256::ZERO);
+        journal.clear();
+        assert!(journal.take_force_deploys().is_empty());
     }
 }

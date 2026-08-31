@@ -5,6 +5,7 @@ pub mod api;
 pub mod block_system_calls;
 pub mod constants;
 pub mod evm;
+pub mod force_deploy;
 pub mod handler;
 pub mod journal;
 pub mod l2_to_l1_logs;

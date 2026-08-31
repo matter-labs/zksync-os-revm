@@ -1,3 +1,4 @@
+use crate::force_deploy::ForceDeployRecorder;
 use crate::precompiles::utils::{oog_error, revert};
 use crate::precompiles::v2::gas_cost::HOOK_BASE_GAS_COST;
 use crate::precompiles::{
@@ -34,7 +35,7 @@ pub fn deployer_precompile_call<CTX>(
 ) -> InterpreterResult
 where
     CTX: ContextTr,
-    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore,
+    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore + crate::force_deploy::ForceDeployRecorder,
 {
     let view = CalldataView::new(ctx, &inputs.input);
     let mut calldata = view.as_slice();
@@ -143,6 +144,8 @@ where
                 .load_account(address)
                 .expect("load_account");
             ctx.journal_mut().set_code(address, bytecode_padded);
+            ctx.journal_mut()
+                .record_force_deploy(address, observable_bytecode_hash);
 
             InterpreterResult::new(InstructionResult::Return, [].into(), gas)
         }
