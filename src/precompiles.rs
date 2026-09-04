@@ -26,6 +26,7 @@ use v1::deployer::CONTRACT_DEPLOYER_ADDRESS;
 use v1::l1_messenger::L1_MESSENGER_ADDRESS;
 use v1::l2_base_token::L2_BASE_TOKEN_ADDRESS;
 
+use v3::interop_commitment_leaf::INTEROP_COMMITMENT_LEAF_HOOK_ADDRESS;
 use v3::l1_messenger::L1_MESSENGER_HOOK_ADDRESS;
 use v3::mint_base_token::MINT_BASE_TOKEN_HOOK_ADDRESS;
 use v3::set_bytecode_on_address::SET_BYTECODE_ON_ADDRESS_HOOK_ADDRESS;
@@ -84,6 +85,10 @@ where
             }
             L1_MESSENGER_HOOK_ADDRESS => {
                 v3::l1_messenger::l1_messenger_precompile_call as CustomPrecompile<_>
+            }
+            INTEROP_COMMITMENT_LEAF_HOOK_ADDRESS if ZkSpecId::AtlasV4.is_enabled_in(spec) => {
+                v3::interop_commitment_leaf::interop_commitment_leaf_precompile_call
+                    as CustomPrecompile<_>
             }
             _ => return None,
         },
@@ -252,6 +257,8 @@ where
                     || *address == L1_MESSENGER_HOOK_ADDRESS
                     || *address == SET_BYTECODE_ON_ADDRESS_HOOK_ADDRESS
                     || *address == MINT_BASE_TOKEN_HOOK_ADDRESS
+                    || (ZkSpecId::AtlasV4.is_enabled_in(self.spec)
+                        && *address == INTEROP_COMMITMENT_LEAF_HOOK_ADDRESS)
             }
         };
         self.inner.contains(address) || custom
