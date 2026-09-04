@@ -86,7 +86,7 @@ where
             L1_MESSENGER_HOOK_ADDRESS => {
                 v3::l1_messenger::l1_messenger_precompile_call as CustomPrecompile<_>
             }
-            INTEROP_COMMITMENT_LEAF_HOOK_ADDRESS if spec == ZkSpecId::AtlasV4 => {
+            INTEROP_COMMITMENT_LEAF_HOOK_ADDRESS if ZkSpecId::AtlasV4.is_enabled_in(spec) => {
                 v3::interop_commitment_leaf::interop_commitment_leaf_precompile_call
                     as CustomPrecompile<_>
             }
@@ -257,7 +257,7 @@ where
                     || *address == L1_MESSENGER_HOOK_ADDRESS
                     || *address == SET_BYTECODE_ON_ADDRESS_HOOK_ADDRESS
                     || *address == MINT_BASE_TOKEN_HOOK_ADDRESS
-                    || (self.spec == ZkSpecId::AtlasV4
+                    || (ZkSpecId::AtlasV4.is_enabled_in(self.spec)
                         && *address == INTEROP_COMMITMENT_LEAF_HOOK_ADDRESS)
             }
         };

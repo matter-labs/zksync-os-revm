@@ -9,7 +9,7 @@ use revm::{
     primitives::{Address, B256, address},
 };
 
-/// The AtlasV4 hook used to publish every interop commitment-tree leaf to DA.
+/// The hook introduced in AtlasV4 to publish every interop commitment-tree leaf to DA.
 pub const INTEROP_COMMITMENT_LEAF_HOOK_ADDRESS: Address =
     address!("0000000000000000000000000000000000007004");
 
@@ -19,8 +19,8 @@ pub const L2_INTEROP_COMMITMENT_TREE_ADDRESS: Address =
 
 /// Record an interop commitment-tree leaf as an L2→L1 log.
 ///
-/// This is an AtlasV4 hook. The caller contract has already charged EVM gas,
-/// so the hook consumes no additional EVM gas and returns no data.
+/// This hook is available from AtlasV4 onward. The caller contract has already
+/// charged EVM gas, so the hook consumes no additional EVM gas and returns no data.
 pub fn interop_commitment_leaf_precompile_call<CTX>(
     ctx: &mut CTX,
     inputs: &CallInputs,
