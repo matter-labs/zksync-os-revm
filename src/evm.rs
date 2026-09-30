@@ -1,16 +1,25 @@
 //! Contains the `[ZKsyncEvm]` type and its implementation of the execution EVM traits.
-use crate::{ZkSpecId, precompiles::ZKsyncPrecompiles};
+use crate::{
+    ZkSpecId,
+    precompiles::ZKsyncPrecompiles,
+    transaction::{ZkTxTr, effective_gas_price_for_spec},
+};
 use revm::{
     Database, Inspector,
+    bytecode::opcode::GASPRICE,
     context::{Cfg, ContextError, ContextSetters, Evm, FrameStack},
-    context_interface::ContextTr,
+    context_interface::{Block, ContextTr},
     handler::{
         EthFrame, EvmTr, FrameInitOrResult, ItemOrResult, PrecompileProvider,
         evm::FrameTr,
         instructions::{EthInstructions, InstructionProvider},
     },
     inspector::{InspectorEvmTr, JournalExt},
-    interpreter::{InterpreterResult, interpreter::EthInterpreter},
+    interpreter::{
+        Instruction, InstructionContext, InstructionExecResult, InstructionResult,
+        InterpreterResult, interpreter::EthInterpreter,
+    },
+    primitives::U256,
 };
 
 /// ZKsync OS EVM extends the [`Evm`] type with specific types and logic.
@@ -26,20 +35,37 @@ pub struct ZKsyncEvm<
     pub Evm<CTX, INSP, I, P, F>,
 );
 
-impl<CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>, INSP>
+impl<CTX: ContextTr<Tx: ZkTxTr, Cfg: Cfg<Spec = ZkSpecId>>, INSP>
     ZKsyncEvm<CTX, INSP, EthInstructions<EthInterpreter, CTX>, ZKsyncPrecompiles>
 {
     /// Create a new ZKsync OS EVM.
     pub fn new(ctx: CTX, inspector: INSP) -> Self {
         let spec = ctx.cfg().spec().into();
+        let mut instruction = EthInstructions::new_mainnet_with_spec(spec);
+        // Keep REVM's gas table, but use the same price as ZKsync fee accounting.
+        instruction.instruction_table_mut()[GASPRICE as usize] = Instruction::new(gasprice::<CTX>);
         Self(Evm {
             precompiles: ZKsyncPrecompiles::new_with_spec(ctx.cfg().spec()),
             ctx,
             inspector,
-            instruction: EthInstructions::new_mainnet_with_spec(spec),
+            instruction,
             frame_stack: FrameStack::new(),
         })
     }
+}
+
+fn gasprice<CTX: ContextTr<Tx: ZkTxTr, Cfg: Cfg<Spec = ZkSpecId>>>(
+    context: InstructionContext<'_, CTX, EthInterpreter>,
+) -> InstructionExecResult {
+    let price = effective_gas_price_for_spec(
+        context.host.tx(),
+        context.host.block().basefee() as u128,
+        context.host.cfg().spec(),
+    );
+    if !context.interpreter.stack.push(U256::from(price)) {
+        return Err(InstructionResult::StackOverflow);
+    }
+    Ok(())
 }
 
 impl<CTX, INSP, I, P> ZKsyncEvm<CTX, INSP, I, P> {

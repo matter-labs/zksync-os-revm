@@ -7,7 +7,7 @@ use crate::{
     constants::{BASE_TOKEN_HOLDER_ADDRESS, L2_ASSET_TRACKER_ADDRESS, L2_BASE_TOKEN_ADDRESS},
     l2_to_l1_logs::L2ToL1LogStore,
     spec::ZkSpecId,
-    transaction::{ZKsyncTxError, ZkTxTr},
+    transaction::{ZKsyncTxError, ZkTxTr, effective_gas_price_for_spec},
 };
 use revm::{
     context::{LocalContextTr, result::InvalidTransaction},
@@ -132,24 +132,6 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
     }
 
     #[inline]
-    fn effective_gas_price_for_spec<TX: ZkTxTr>(
-        tx: &TX,
-        base_fee: u128,
-        spec_id: ZkSpecId,
-    ) -> u128 {
-        // L1->L2 transactions use their own gas_price set on L1,
-        // independent of the L2 block base_fee.
-        if tx.is_l1_to_l2_tx() {
-            return tx.effective_gas_price(base_fee);
-        }
-        if ZkSpecId::AtlasV3.is_enabled_in(spec_id) && base_fee == 0 {
-            0
-        } else {
-            tx.effective_gas_price(base_fee)
-        }
-    }
-
-    #[inline]
     fn effective_balance_spending_for_spec<TX: ZkTxTr>(
         tx: &TX,
         base_fee: u128,
@@ -157,7 +139,7 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
         spec_id: ZkSpecId,
     ) -> Result<U256, InvalidTransaction> {
         let mut effective_balance_spending = (tx.gas_limit() as u128)
-            .checked_mul(Self::effective_gas_price_for_spec(tx, base_fee, spec_id))
+            .checked_mul(effective_gas_price_for_spec(tx, base_fee, spec_id))
             .and_then(|gas_cost| U256::from(gas_cost).checked_add(tx.value()))
             .ok_or(InvalidTransaction::OverflowPaymentInTransaction)?;
 
@@ -187,7 +169,7 @@ impl<EVM, ERROR, FRAME> ZKsyncHandler<EVM, ERROR, FRAME> {
     #[inline]
     fn atlas_l1_fee_flow<TX: ZkTxTr>(tx: &TX, base_fee: u128, spec_id: ZkSpecId) -> AtlasL1FeeFlow {
         debug_assert!(ZkSpecId::AtlasV3.is_enabled_in(spec_id));
-        let effective_gas_price = Self::effective_gas_price_for_spec(tx, base_fee, spec_id);
+        let effective_gas_price = effective_gas_price_for_spec(tx, base_fee, spec_id);
         let prepaid_fee = U256::from(tx.gas_limit()) * U256::from(effective_gas_price);
         let mint = tx.mint().unwrap_or_default();
         let upfront_transfer = mint.saturating_sub(prepaid_fee);
@@ -278,7 +260,7 @@ where
         let l1_chain_id = Self::read_l1_chain_id(evm)?;
         let basefee = evm.ctx().block().basefee() as u128;
         let spec_id = evm.ctx().cfg().spec();
-        let gas_price = U256::from(Self::effective_gas_price_for_spec(
+        let gas_price = U256::from(effective_gas_price_for_spec(
             evm.ctx().tx(),
             basefee,
             spec_id,
@@ -748,7 +730,7 @@ where
         let Some(l1_mode) = l1_mode else {
             let caller = evm.ctx().tx().caller();
             let effective_gas_price =
-                Self::effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
+                effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
             // Clamp defensively to avoid accidental wrap if call ordering changes.
             let refunded_gas = frame_result.gas().refunded().max(0) as u64;
             let refund = U256::from(
@@ -771,8 +753,7 @@ where
             .refund_recipient()
             .expect("Refund recipient is missing for L1 -> L2 tx");
 
-        let effective_gas_price =
-            Self::effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
+        let effective_gas_price = effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
         let gas_used = frame_result
             .gas()
             .used()
@@ -829,8 +810,7 @@ where
         let beneficiary = evm.ctx().block().beneficiary();
         let basefee = evm.ctx().block().basefee() as u128;
         let spec_id = evm.ctx().cfg().spec();
-        let effective_gas_price =
-            Self::effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
+        let effective_gas_price = effective_gas_price_for_spec(evm.ctx().tx(), basefee, spec_id);
         let l1_mode = Self::l1_tx_accounting_mode(evm.ctx().tx(), spec_id);
         let gas_used = frame_result
             .gas()
