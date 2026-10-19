@@ -1136,7 +1136,7 @@ mod tests {
 
     #[test]
     fn set_code_transaction_delegates_the_authority() {
-        for spec in [ZkSpecId::AtlasV3, ZkSpecId::AtlasV4] {
+        for spec in [ZkSpecId::AtlasV3, ZkSpecId::AtlasV4, ZkSpecId::AtlasV5] {
             let outcome = run_set_code_transaction(spec, Authority::InState, 0)
                 .expect("the transaction runs");
 
@@ -1162,7 +1162,7 @@ mod tests {
         const INTRINSIC_GAS: u64 = 21_000 + PER_EMPTY_ACCOUNT_COST;
         const CAPPED_REFUND: u64 = INTRINSIC_GAS / 5;
 
-        for spec in [ZkSpecId::AtlasV3, ZkSpecId::AtlasV4] {
+        for spec in [ZkSpecId::AtlasV3, ZkSpecId::AtlasV4, ZkSpecId::AtlasV5] {
             let with_refund = run_set_code_transaction(spec, Authority::InState, 0)
                 .expect("the transaction runs");
             let without_refund =

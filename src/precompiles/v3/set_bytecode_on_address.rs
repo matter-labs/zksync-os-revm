@@ -4,7 +4,6 @@ use crate::precompiles::utils::{oog_error, revert};
 use crate::precompiles::v3::common::{
     COMPLEX_UPGRADER_ADDRESS, CONTRACT_DEPLOYER_ADDRESS, zksync_os_hook_input_check,
 };
-use crate::precompiles::v3::deployer::MAX_CODE_SIZE;
 use crate::precompiles::v3::gas_cost::set_bytecode_details_extra_gas;
 use revm::Database;
 use revm::interpreter::CallInputs;
@@ -12,7 +11,7 @@ use revm::interpreter::gas::{COLD_ACCOUNT_ACCESS_COST, WARM_STORAGE_READ_COST};
 use revm::primitives::{B256, Bytes};
 use revm::state::Bytecode;
 use revm::{
-    context::JournalTr,
+    context::{Cfg, JournalTr},
     context_interface::ContextTr,
     interpreter::{Gas, InstructionResult, InterpreterResult},
     primitives::{Address, U256, address},
@@ -27,6 +26,7 @@ pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr<Journal: ForceDepl
     inputs: &CallInputs,
     is_delegate: bool,
 ) -> InterpreterResult {
+    let max_code_size = ctx.cfg().max_code_size();
     let calldata_view = CalldataView::new(ctx, &inputs.input);
     let calldata = calldata_view.as_slice();
     let caller = inputs.caller;
@@ -46,7 +46,7 @@ pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr<Journal: ForceDepl
     }
 
     let (address, observable_bytecode_hash, bytecode_length) =
-        match set_bytecode_on_address_parse_calldata(calldata, gas) {
+        match set_bytecode_on_address_parse_calldata(calldata, gas, max_code_size) {
             Ok(x) => x,
             Err(early_return) => return early_return,
         };
@@ -57,9 +57,13 @@ pub fn set_bytecode_on_address_precompile_call<CTX: ContextTr<Journal: ForceDepl
     set_bytecode_on_address_internal(ctx, address, observable_bytecode_hash, bytecode_length, gas)
 }
 
+/// Parse `(address, observable_bytecode_hash, bytecode_length)` from the
+/// calldata, reverting when the length exceeds `max_code_size` (the chain's
+/// EIP-170 limit, `Cfg::max_code_size`).
 pub fn set_bytecode_on_address_parse_calldata(
     calldata: &[u8],
     gas: Gas,
+    max_code_size: usize,
 ) -> Result<(Address, B256, u32), InterpreterResult> {
     if calldata.len() < 128 {
         return Err(revert(gas));
@@ -87,8 +91,7 @@ pub fn set_bytecode_on_address_parse_calldata(
     let observable_bytecode_hash = B256::from_slice(&calldata[96..128]);
     // Although this can be called as a part of protocol upgrade,
     // we are checking the next invariants, just in case
-    // EIP-158: reject code of length > 24576.
-    if bytecode_length as usize > MAX_CODE_SIZE {
+    if bytecode_length as usize > max_code_size {
         return Err(revert(gas));
     }
 

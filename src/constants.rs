@@ -8,3 +8,8 @@ pub const COMPLEX_UPGRADER_ADDRESS: Address = address!("000000000000000000000000
 
 /// EIP-2935 historical block hash contract (canonical mainnet address).
 pub const HISTORY_STORAGE_ADDRESS: Address = address!("0000F90827F1C53a10cb7A02335B175320002935");
+
+/// Deployed-code limit of a chain with large contracts enabled (ZKsync OS
+/// `LARGE_MAX_CODE_SIZE`, 0.6.0 onwards). Such a chain sets it as
+/// `CfgEnv::limit_contract_code_size`; the initcode limit follows at twice it.
+pub const LARGE_CONTRACTS_MAX_CODE_SIZE: usize = 0x10000;

@@ -6,6 +6,7 @@ use crate::precompiles::v3::set_bytecode_on_address::{
 };
 use revm::interpreter::CallInputs;
 use revm::{
+    context::Cfg,
     context_interface::ContextTr,
     interpreter::{Gas, InterpreterResult},
     primitives::{Address, address},
@@ -15,8 +16,6 @@ use revm::{
 pub const SET_EVM_BYTECODE_DETAILS: &[u8] = &[0xf6, 0xec, 0xa0, 0xb0];
 pub const L2_GENESIS_UPGRADE_ADDRESS: Address =
     address!("000000000000000000000000000000000000800f");
-
-pub const MAX_CODE_SIZE: usize = 0x6000;
 
 /// Run the deployer precompile.
 pub fn deployer_precompile_call<CTX>(
@@ -28,6 +27,7 @@ where
     CTX: ContextTr,
     CTX::Journal: crate::force_deploy::ForceDeployRecorder,
 {
+    let max_code_size = ctx.cfg().max_code_size();
     let view = CalldataView::new(ctx, &inputs.input);
     let mut calldata = view.as_slice();
     let caller = inputs.caller;
@@ -62,7 +62,7 @@ where
             calldata = &calldata[4..];
 
             let (address, observable_bytecode_hash, bytecode_length) =
-                match set_bytecode_on_address_parse_calldata(calldata, gas) {
+                match set_bytecode_on_address_parse_calldata(calldata, gas, max_code_size) {
                     Ok(x) => x,
                     Err(early_return) => return early_return,
                 };
