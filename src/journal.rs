@@ -517,11 +517,12 @@ mod tests {
     const OP_CALL: u8 = 0xf1;
     const OP_REVERT: u8 = 0xfd;
 
-    const ALL_SPECS: [ZkSpecId; 4] = [
+    const ALL_SPECS: [ZkSpecId; 5] = [
         ZkSpecId::AtlasV1,
         ZkSpecId::AtlasV2,
         ZkSpecId::AtlasV3,
         ZkSpecId::AtlasV4,
+        ZkSpecId::AtlasV5,
     ];
 
     /// How a frame ends.
@@ -581,7 +582,7 @@ mod tests {
     fn message_sender_address(spec: ZkSpecId) -> Address {
         match spec {
             ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => MESSAGE_SENDER_CONTRACT,
-            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 => L1_MESSENGER_ADDRESS,
+            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 => L1_MESSENGER_ADDRESS,
         }
     }
 
@@ -599,7 +600,7 @@ mod tests {
                 code.extend(store_code(68, message));
                 code.extend(call_code(L1_MESSENGER_ADDRESS, 100));
             }
-            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 => {
+            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 => {
                 // The hook takes abi.encodePacked(address sender, bytes message).
                 let mut sender = [0u8; 32];
                 sender[..20].copy_from_slice(L1_MESSENGER_ADDRESS.as_slice());

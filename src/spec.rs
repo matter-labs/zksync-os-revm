@@ -28,8 +28,12 @@ pub enum ZkSpecId {
     AtlasV1,
     AtlasV2,
     AtlasV3,
-    #[default]
     AtlasV4,
+    /// ZKsync OS 0.6.0 (protocol v34). The AtlasV4 EVM rules; the chain config
+    /// adds L1 transaction filtering and large contracts, which reach REVM as
+    /// operator hints and `CfgEnv::limit_contract_code_size`.
+    #[default]
+    AtlasV5,
 }
 
 impl ZkSpecId {
@@ -37,7 +41,7 @@ impl ZkSpecId {
     pub const fn into_eth_spec(self) -> SpecId {
         match self {
             Self::AtlasV1 | Self::AtlasV2 | Self::AtlasV3 => SpecId::CANCUN,
-            Self::AtlasV4 => SpecId::OSAKA,
+            Self::AtlasV4 | Self::AtlasV5 => SpecId::OSAKA,
         }
     }
 
@@ -82,6 +86,7 @@ impl FromStr for ZkSpecId {
             name::ATLASV2 => Ok(ZkSpecId::AtlasV2),
             name::ATLASV3 => Ok(ZkSpecId::AtlasV3),
             name::ATLASV4 => Ok(ZkSpecId::AtlasV4),
+            name::ATLASV5 => Ok(ZkSpecId::AtlasV5),
             _ => Err(UnknownHardfork),
         }
     }
@@ -94,6 +99,7 @@ impl From<ZkSpecId> for &'static str {
             ZkSpecId::AtlasV2 => name::ATLASV2,
             ZkSpecId::AtlasV3 => name::ATLASV3,
             ZkSpecId::AtlasV4 => name::ATLASV4,
+            ZkSpecId::AtlasV5 => name::ATLASV5,
         }
     }
 }
@@ -105,4 +111,22 @@ pub mod name {
     pub const ATLASV2: &str = "AtlasV2";
     pub const ATLASV3: &str = "AtlasV3";
     pub const ATLASV4: &str = "AtlasV4";
+    pub const ATLASV5: &str = "AtlasV5";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atlas_v5_is_the_latest_spec_and_runs_osaka() {
+        assert_eq!(ZkSpecId::default(), ZkSpecId::AtlasV5);
+        assert_eq!(ZkSpecId::AtlasV5.into_eth_spec(), SpecId::OSAKA);
+        assert!(ZkSpecId::AtlasV4.is_enabled_in(ZkSpecId::AtlasV5));
+        assert!(!ZkSpecId::AtlasV5.is_enabled_in(ZkSpecId::AtlasV4));
+        assert!(ZkSpecId::AtlasV5.supports_eip7702());
+        assert!(!ZkSpecId::AtlasV5.borrows_eip7702_from_prague());
+        assert_eq!("AtlasV5".parse::<ZkSpecId>().ok(), Some(ZkSpecId::AtlasV5));
+        assert_eq!(<&'static str>::from(ZkSpecId::AtlasV5), "AtlasV5");
+    }
 }
