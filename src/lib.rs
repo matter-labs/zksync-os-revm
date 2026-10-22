@@ -20,5 +20,6 @@ pub use api::{
 pub use block_system_calls::apply_pre_block_system_calls;
 pub use evm::ZKsyncEvm;
 pub use journal::ZkJournal;
+pub use precompiles::l1sload::L1Witness;
 pub use spec::*;
 pub use transaction::{ZKsyncTx, error::ZKsyncTxError};

@@ -14,6 +14,14 @@ pub fn revert(g: Gas) -> InterpreterResult {
     InterpreterResult::new(InstructionResult::Revert, [].into(), g)
 }
 
+/// A revert with no output that consumes all `gas_limit`, as a ZKsync OS hook
+/// fails a call it exhausts.
+pub fn revert_consuming_all_gas(gas_limit: u64) -> InterpreterResult {
+    let mut gas = Gas::new(gas_limit);
+    gas.spend_all();
+    revert(gas)
+}
+
 pub fn oog_error() -> InterpreterResult {
     InterpreterResult::new(InstructionResult::OutOfGas, [].into(), Gas::new(0))
 }

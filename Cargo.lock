@@ -159,6 +159,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloy-trie"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b94e3e0a88f8db47250ac8a95fb825d020719f833eb1dc661bd3609c3bbece7d"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rlp",
+ "derive_more",
+ "nybbles",
+ "smallvec",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1569,6 +1584,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nybbles"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d49ff0c0d00d4a502b39df9af3a525e1efeb14b9dabb5bb83335284c1309210"
+dependencies = [
+ "cfg-if",
+ "ruint",
+ "smallvec",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2906,6 +2932,8 @@ dependencies = [
 name = "zksync-os-revm"
 version = "0.1.0"
 dependencies = [
+ "alloy-rlp",
+ "alloy-trie",
  "auto_impl",
  "revm",
  "serde",

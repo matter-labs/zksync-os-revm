@@ -1,14 +1,14 @@
 //! Contains the `[ZKsyncEvm]` type and its implementation of the execution EVM traits.
 use crate::{
     ZkSpecId,
-    precompiles::ZKsyncPrecompiles,
+    precompiles::{ZKsyncPrecompiles, l1sload::L1Witness},
     transaction::{ZkTxTr, effective_gas_price_for_spec},
 };
 use revm::{
     Database, Inspector,
     bytecode::opcode::GASPRICE,
     context::{Cfg, ContextError, ContextSetters, Evm, FrameStack},
-    context_interface::{Block, ContextTr},
+    context_interface::{Block, ContextTr, JournalTr},
     handler::{
         EthFrame, EvmTr, FrameInitOrResult, ItemOrResult, PrecompileProvider,
         evm::FrameTr,
@@ -66,6 +66,26 @@ fn gasprice<CTX: ContextTr<Tx: ZkTxTr, Cfg: Cfg<Spec = ZkSpecId>>>(
         return Err(InstructionResult::StackOverflow);
     }
     Ok(())
+}
+
+impl<CTX: ContextTr, INSP, I> ZKsyncEvm<CTX, INSP, I, ZKsyncPrecompiles> {
+    /// Enable the L1SLOAD precompile with the block's witness, for chains whose
+    /// ZKsync OS chain config sets `l1sload_enabled`.
+    pub fn with_l1sload(mut self, witness: L1Witness) -> Self {
+        self.set_l1sload(Some(witness));
+        self
+    }
+
+    /// Set the L1SLOAD witness for the transactions that follow, or turn
+    /// L1SLOAD off with `None`, e.g. when moving on to the next block.
+    pub fn set_l1sload(&mut self, witness: Option<L1Witness>) {
+        self.0.precompiles.set_l1sload(witness);
+        // REVM reloads the journal's warm precompiles only on a spec change.
+        self.0
+            .ctx
+            .journal_mut()
+            .warm_precompiles(self.0.precompiles.warm_address_set());
+    }
 }
 
 impl<CTX, INSP, I, P> ZKsyncEvm<CTX, INSP, I, P> {
