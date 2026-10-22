@@ -5,7 +5,7 @@ use revm::precompile::secp256r1::P256VERIFY_ADDRESS;
 use revm::precompile::u64_to_address;
 use revm::{
     context::Cfg,
-    context_interface::ContextTr,
+    context_interface::{ContextTr, JournalTr},
     handler::{EthPrecompiles, PrecompileProvider},
     interpreter::InterpreterResult,
     precompile::{
@@ -13,10 +13,13 @@ use revm::{
         secp256k1, secp256r1,
     },
     primitives::{Address, AddressSet, OnceLock},
+    state::EvmState,
 };
 use std::string::String;
+use std::sync::Arc;
 
 pub mod calldata_view;
+pub mod l1sload;
 pub(crate) mod utils;
 pub mod v1;
 pub mod v2;
@@ -25,6 +28,8 @@ pub mod v3;
 use v1::deployer::CONTRACT_DEPLOYER_ADDRESS;
 use v1::l1_messenger::L1_MESSENGER_ADDRESS;
 use v1::l2_base_token::L2_BASE_TOKEN_ADDRESS;
+
+use l1sload::{L1SLOAD_ADDRESS, L1Witness, L1sloadReadSet};
 
 use v3::interop_commitment_leaf::INTEROP_COMMITMENT_LEAF_HOOK_ADDRESS;
 use v3::l1_messenger::L1_MESSENGER_HOOK_ADDRESS;
@@ -72,26 +77,28 @@ where
             }
             _ => return None,
         },
-        ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 => match precompile_address {
-            CONTRACT_DEPLOYER_ADDRESS => {
-                v3::deployer::deployer_precompile_call as CustomPrecompile<_>
+        ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 | ZkSpecId::AtlasV6 => {
+            match precompile_address {
+                CONTRACT_DEPLOYER_ADDRESS => {
+                    v3::deployer::deployer_precompile_call as CustomPrecompile<_>
+                }
+                MINT_BASE_TOKEN_HOOK_ADDRESS => {
+                    v3::mint_base_token::mint_base_token_precompile_call as CustomPrecompile<_>
+                }
+                SET_BYTECODE_ON_ADDRESS_HOOK_ADDRESS => {
+                    v3::set_bytecode_on_address::set_bytecode_on_address_precompile_call
+                        as CustomPrecompile<_>
+                }
+                L1_MESSENGER_HOOK_ADDRESS => {
+                    v3::l1_messenger::l1_messenger_precompile_call as CustomPrecompile<_>
+                }
+                INTEROP_COMMITMENT_LEAF_HOOK_ADDRESS if ZkSpecId::AtlasV4.is_enabled_in(spec) => {
+                    v3::interop_commitment_leaf::interop_commitment_leaf_precompile_call
+                        as CustomPrecompile<_>
+                }
+                _ => return None,
             }
-            MINT_BASE_TOKEN_HOOK_ADDRESS => {
-                v3::mint_base_token::mint_base_token_precompile_call as CustomPrecompile<_>
-            }
-            SET_BYTECODE_ON_ADDRESS_HOOK_ADDRESS => {
-                v3::set_bytecode_on_address::set_bytecode_on_address_precompile_call
-                    as CustomPrecompile<_>
-            }
-            L1_MESSENGER_HOOK_ADDRESS => {
-                v3::l1_messenger::l1_messenger_precompile_call as CustomPrecompile<_>
-            }
-            INTEROP_COMMITMENT_LEAF_HOOK_ADDRESS if ZkSpecId::AtlasV4.is_enabled_in(spec) => {
-                v3::interop_commitment_leaf::interop_commitment_leaf_precompile_call
-                    as CustomPrecompile<_>
-            }
-            _ => return None,
-        },
+        }
     };
 
     let is_delegate = inputs.bytecode_address != inputs.target_address;
@@ -107,12 +114,35 @@ pub struct ZKsyncPrecompiles {
     spec: ZkSpecId,
     /// Addresses warmed at the start of a transaction for the active spec.
     warm_addresses: &'static AddressSet,
+    /// The block's L1SLOAD witness, when the chain enables L1SLOAD.
+    l1sload: Option<Arc<L1Witness>>,
 }
 
 impl ZKsyncPrecompiles {
-    /// Create a new precompile provider with the given ZkSpec.
+    /// Create a new precompile provider with the given ZkSpec, L1SLOAD off.
     #[inline]
     pub fn new_with_spec(spec: ZkSpecId) -> Self {
+        Self::build(spec, None)
+    }
+
+    /// Use [`crate::ZKsyncEvm::set_l1sload`], which also updates the journal's
+    /// warm set.
+    pub(crate) fn set_l1sload(&mut self, witness: Option<L1Witness>) {
+        *self = Self::build(self.spec, witness.map(Arc::new));
+    }
+
+    pub(crate) fn warm_address_set(&self) -> &'static AddressSet {
+        self.warm_addresses
+    }
+
+    /// The witness, if the chain enables L1SLOAD and the spec has it.
+    pub(crate) fn l1sload_witness(&self) -> Option<&L1Witness> {
+        self.l1sload
+            .as_deref()
+            .filter(|_| self.spec.supports_l1sload())
+    }
+
+    fn build(spec: ZkSpecId, l1sload: Option<Arc<L1Witness>>) -> Self {
         let precompiles = match spec {
             ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 | ZkSpecId::AtlasV3 => {
                 static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
@@ -135,7 +165,7 @@ impl ZKsyncPrecompiles {
                     precompiles
                 })
             }
-            ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 => {
+            ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 | ZkSpecId::AtlasV6 => {
                 static INSTANCE: OnceLock<Precompiles> = OnceLock::new();
                 INSTANCE.get_or_init(|| {
                     // AtlasV4 (ZKsync OS v0.4.0, Pectra + Fusaka) is the AtlasV1-V3
@@ -185,6 +215,17 @@ impl ZKsyncPrecompiles {
             ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 => {
                 precompiles.addresses_set()
             }
+            // Like every precompile, L1SLOAD is warm from the start of a
+            // transaction (EIP-2929), on a chain that enables it.
+            ZkSpecId::AtlasV6 if l1sload.is_some() => {
+                static WARM: OnceLock<AddressSet> = OnceLock::new();
+                WARM.get_or_init(|| {
+                    let mut warm = precompiles.addresses_set().clone();
+                    warm.insert(L1SLOAD_ADDRESS);
+                    warm
+                })
+            }
+            ZkSpecId::AtlasV6 => precompiles.addresses_set(),
         };
 
         Self {
@@ -194,6 +235,7 @@ impl ZKsyncPrecompiles {
             },
             spec,
             warm_addresses,
+            l1sload,
         }
     }
 
@@ -207,7 +249,10 @@ impl ZKsyncPrecompiles {
 impl<CTX> PrecompileProvider<CTX> for ZKsyncPrecompiles
 where
     CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
-    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore + crate::force_deploy::ForceDeployRecorder,
+    CTX::Journal: crate::l2_to_l1_logs::L2ToL1LogStore
+        + crate::force_deploy::ForceDeployRecorder
+        + L1sloadReadSet
+        + JournalTr<State = EvmState>,
 {
     type Output = InterpreterResult;
 
@@ -216,7 +261,8 @@ where
         if spec == self.spec {
             return false;
         }
-        *self = Self::new_with_spec(spec);
+        // The witness belongs to the block, not to the spec.
+        *self = Self::build(spec, self.l1sload.take());
         true
     }
 
@@ -226,6 +272,11 @@ where
         context: &mut CTX,
         inputs: &CallInputs,
     ) -> Result<Option<Self::Output>, String> {
+        if inputs.bytecode_address == L1SLOAD_ADDRESS
+            && let Some(witness) = self.l1sload_witness()
+        {
+            return l1sload::l1sload_precompile_call(context, inputs, witness).map(Some);
+        }
         maybe_call_custom_precompile(self.spec, context, inputs).map_or_else(
             || self.inner.run(context, inputs),
             |result| Ok(Some(result)),
@@ -254,13 +305,14 @@ where
                     || *address == L1_MESSENGER_ADDRESS
                     || *address == L2_BASE_TOKEN_ADDRESS
             }
-            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 => {
+            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 | ZkSpecId::AtlasV6 => {
                 *address == CONTRACT_DEPLOYER_ADDRESS
                     || *address == L1_MESSENGER_HOOK_ADDRESS
                     || *address == SET_BYTECODE_ON_ADDRESS_HOOK_ADDRESS
                     || *address == MINT_BASE_TOKEN_HOOK_ADDRESS
                     || (ZkSpecId::AtlasV4.is_enabled_in(self.spec)
                         && *address == INTEROP_COMMITMENT_LEAF_HOOK_ADDRESS)
+                    || (*address == L1SLOAD_ADDRESS && self.l1sload_witness().is_some())
             }
         };
         self.inner.contains(address) || custom
@@ -277,7 +329,7 @@ impl Default for ZKsyncPrecompiles {
 mod tests {
     use super::*;
     use crate::api::builder::ZkBuilder;
-    use crate::api::default_ctx::zk_context;
+    use crate::api::default_ctx::{ZkContext, zk_context};
     use crate::constants::{COMPLEX_UPGRADER_ADDRESS, LARGE_CONTRACTS_MAX_CODE_SIZE};
     use crate::{ZKsyncTx, ZkSpecId};
     use revm::primitives::eip170;
@@ -307,12 +359,13 @@ mod tests {
     const OP_CALL: u8 = 0xf1;
     const OP_RETURN: u8 = 0xf3;
 
-    const ALL_SPECS: [ZkSpecId; 5] = [
+    const ALL_SPECS: [ZkSpecId; 6] = [
         ZkSpecId::AtlasV1,
         ZkSpecId::AtlasV2,
         ZkSpecId::AtlasV3,
         ZkSpecId::AtlasV4,
         ZkSpecId::AtlasV5,
+        ZkSpecId::AtlasV6,
     ];
 
     /// The two force-deploy entry points. They share the calldata parsing.
@@ -515,7 +568,12 @@ mod tests {
             (LARGE_CONTRACTS_MAX_CODE_SIZE + 1, large, false),
         ];
 
-        for spec in [ZkSpecId::AtlasV3, ZkSpecId::AtlasV4, ZkSpecId::AtlasV5] {
+        for spec in [
+            ZkSpecId::AtlasV3,
+            ZkSpecId::AtlasV4,
+            ZkSpecId::AtlasV5,
+            ZkSpecId::AtlasV6,
+        ] {
             for hook in [
                 ForceDeployHook::Deployer,
                 ForceDeployHook::SetBytecodeOnAddress,
@@ -598,5 +656,35 @@ mod tests {
             assert!(v4.contains(&hook), "{hook}");
             assert!(v5.contains(&hook), "{hook}");
         }
+    }
+
+    /// A provider as the handler sees it.
+    type ZkProvider = dyn PrecompileProvider<ZkContext<EmptyDB>, Output = InterpreterResult>;
+
+    #[test]
+    fn atlas_v6_without_l1sload_keeps_the_atlas_v5_precompiles() {
+        let v5 = ZKsyncPrecompiles::new_with_spec(ZkSpecId::AtlasV5);
+        let v6 = ZKsyncPrecompiles::new_with_spec(ZkSpecId::AtlasV6);
+        assert!(core::ptr::eq(v5.precompiles(), v6.precompiles()));
+        assert_eq!(v5.warm_addresses, v6.warm_addresses);
+        let provider: &ZkProvider = &v6;
+        assert!(!provider.contains(&L1SLOAD_ADDRESS));
+    }
+
+    #[test]
+    fn a_spec_switch_keeps_the_l1sload_witness() {
+        let mut witness = L1Witness::new();
+        witness.insert(Bytes::from_static(b"node"));
+        let mut provider = ZKsyncPrecompiles::new_with_spec(ZkSpecId::AtlasV5);
+        provider.set_l1sload(Some(witness.clone()));
+        assert!(
+            provider.l1sload_witness().is_none(),
+            "AtlasV5 has no L1SLOAD"
+        );
+
+        let as_provider: &mut ZkProvider = &mut provider;
+        assert!(as_provider.set_spec(ZkSpecId::AtlasV6));
+        assert!(as_provider.warm_addresses().contains(&L1SLOAD_ADDRESS));
+        assert_eq!(provider.l1sload_witness(), Some(&witness));
     }
 }

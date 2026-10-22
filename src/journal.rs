@@ -1,6 +1,7 @@
 //! Contains the [`ZkJournal`] type: the REVM journal extended with the L2→L1 log store.
 use crate::force_deploy::ForceDeployRecorder;
 use crate::l2_to_l1_logs::{L2ToL1Log, L2ToL1LogStore};
+use crate::precompiles::l1sload::{L1sloadRead, L1sloadReadSet};
 use revm::{
     Journal,
     bytecode::Bytecode,
@@ -60,6 +61,9 @@ pub struct ZkJournal<DB> {
     /// Each transaction boundary clears it, so the number cannot carry over
     /// from the transaction before.
     tx_number_set: bool,
+    /// Distinct L1SLOAD reads of the transaction. Unlike the records above, a
+    /// revert keeps them, as ZKsync OS counts reverted reads against the cap.
+    l1sload_reads: HashSet<L1sloadRead>,
 }
 
 impl<DB> ZkJournal<DB> {
@@ -93,6 +97,7 @@ impl<DB> ZkJournal<DB> {
         self.log_count_at_transaction_start = 0;
         self.force_deploy_count_at_transaction_start = 0;
         self.tx_number_set = false;
+        self.l1sload_reads.clear();
     }
 }
 
@@ -108,6 +113,12 @@ impl<DB> ForceDeployRecorder for ZkJournal<DB> {
         );
         self.force_deploy_count_at_transaction_start = 0;
         core::mem::take(&mut self.force_deploys)
+    }
+}
+
+impl<DB> L1sloadReadSet for ZkJournal<DB> {
+    fn l1sload_reads(&mut self) -> &mut HashSet<L1sloadRead> {
+        &mut self.l1sload_reads
     }
 }
 
@@ -151,6 +162,7 @@ impl<DB: Database> JournalTr for ZkJournal<DB> {
             force_deploy_count_at_transaction_start: 0,
             tx_number: 0,
             tx_number_set: false,
+            l1sload_reads: HashSet::default(),
         }
     }
 
@@ -212,6 +224,7 @@ impl<DB: Database> JournalTr for ZkJournal<DB> {
         self.log_count_at_transaction_start = self.l2_to_l1_logs.len();
         self.force_deploy_count_at_transaction_start = self.force_deploys.len();
         self.tx_number_set = false;
+        self.l1sload_reads.clear();
         self.inner.commit_tx()
     }
 
@@ -225,6 +238,7 @@ impl<DB: Database> JournalTr for ZkJournal<DB> {
             .truncate(self.force_deploy_count_at_transaction_start);
         self.force_deploy_count_at_transaction_start = self.force_deploys.len();
         self.tx_number_set = false;
+        self.l1sload_reads.clear();
         self.inner.discard_tx()
     }
 
@@ -517,12 +531,13 @@ mod tests {
     const OP_CALL: u8 = 0xf1;
     const OP_REVERT: u8 = 0xfd;
 
-    const ALL_SPECS: [ZkSpecId; 5] = [
+    const ALL_SPECS: [ZkSpecId; 6] = [
         ZkSpecId::AtlasV1,
         ZkSpecId::AtlasV2,
         ZkSpecId::AtlasV3,
         ZkSpecId::AtlasV4,
         ZkSpecId::AtlasV5,
+        ZkSpecId::AtlasV6,
     ];
 
     /// How a frame ends.
@@ -582,7 +597,9 @@ mod tests {
     fn message_sender_address(spec: ZkSpecId) -> Address {
         match spec {
             ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => MESSAGE_SENDER_CONTRACT,
-            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 => L1_MESSENGER_ADDRESS,
+            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 | ZkSpecId::AtlasV6 => {
+                L1_MESSENGER_ADDRESS
+            }
         }
     }
 
@@ -600,7 +617,7 @@ mod tests {
                 code.extend(store_code(68, message));
                 code.extend(call_code(L1_MESSENGER_ADDRESS, 100));
             }
-            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 => {
+            ZkSpecId::AtlasV3 | ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 | ZkSpecId::AtlasV6 => {
                 // The hook takes abi.encodePacked(address sender, bytes message).
                 let mut sender = [0u8; 32];
                 sender[..20].copy_from_slice(L1_MESSENGER_ADDRESS.as_slice());
@@ -884,5 +901,28 @@ mod tests {
         journal.record_force_deploy(CALLER, B256::ZERO);
         journal.clear();
         assert!(journal.take_force_deploys().is_empty());
+    }
+
+    #[test]
+    fn the_l1sload_reads_survive_reverts_and_reset_per_transaction() {
+        let read = |key: u8| L1sloadRead {
+            anchor: B256::repeat_byte(1),
+            address: CALLER,
+            key: B256::repeat_byte(key),
+        };
+        let mut journal = ZkJournal::new(database(&[]));
+        let checkpoint = journal.checkpoint();
+        journal.l1sload_reads().insert(read(1));
+        journal.checkpoint_revert(checkpoint);
+        assert!(journal.l1sload_reads().contains(&read(1)));
+
+        journal.commit_tx();
+        assert!(journal.l1sload_reads().is_empty(), "commit_tx");
+        journal.l1sload_reads().insert(read(2));
+        journal.discard_tx();
+        assert!(journal.l1sload_reads().is_empty(), "discard_tx");
+        journal.l1sload_reads().insert(read(3));
+        journal.clear();
+        assert!(journal.l1sload_reads().is_empty(), "clear");
     }
 }

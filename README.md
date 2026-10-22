@@ -7,6 +7,7 @@ This repo contains the custom EVM implementation compatible with the ZKsync OS e
     - Deployer
     - L2 -> L1 messenger
     - L2 Base token
+- The L1SLOAD precompile (`0x101`, from `AtlasV6`, on chains that enable it), see [`src/precompiles/l1sload.rs`](src/precompiles/l1sload.rs).
 
 This code can be used as an alternative implementation of ZKsync OS, but its primary use for now is the consistency checker in the ZKsync OS server. The ZKsync OS server executes transactions in its native environment and then re-executes the transactions on this variant of REVM.
 

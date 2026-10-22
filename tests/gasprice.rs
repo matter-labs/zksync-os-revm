@@ -18,12 +18,13 @@ const INITIAL_BALANCE: u64 = 1_000_000_000_000_000_000;
 const GAS_LIMIT: u64 = 200_000;
 const GAS_PRICE: u128 = 2_000_000_000;
 const TIP: u128 = 1_000_000_000;
-const ALL_SPECS: [ZkSpecId; 5] = [
+const ALL_SPECS: [ZkSpecId; 6] = [
     ZkSpecId::AtlasV1,
     ZkSpecId::AtlasV2,
     ZkSpecId::AtlasV3,
     ZkSpecId::AtlasV4,
     ZkSpecId::AtlasV5,
+    ZkSpecId::AtlasV6,
 ];
 // GASPRICE PUSH1 1 ADD PUSH0 SSTORE STOP. Adding one ensures a zero gas
 // price still produces a storage write that the consistency checker compares.
@@ -97,7 +98,12 @@ fn execute_gasprice(
 
 #[test]
 fn zero_base_fee_l2_gasprice_matches_zero_fee_accounting() {
-    for spec in [ZkSpecId::AtlasV3, ZkSpecId::AtlasV4, ZkSpecId::AtlasV5] {
+    for spec in [
+        ZkSpecId::AtlasV3,
+        ZkSpecId::AtlasV4,
+        ZkSpecId::AtlasV5,
+        ZkSpecId::AtlasV6,
+    ] {
         for create in [false, true] {
             for (tx_type, tip) in [(0, None), (2, Some(TIP))] {
                 let (slot, balance, _) = execute_gasprice(spec, 0, create, tx_type, tip);
@@ -110,7 +116,12 @@ fn zero_base_fee_l2_gasprice_matches_zero_fee_accounting() {
 
 #[test]
 fn zero_tip_and_zero_base_fee_keep_gasprice_zero() {
-    for spec in [ZkSpecId::AtlasV3, ZkSpecId::AtlasV4, ZkSpecId::AtlasV5] {
+    for spec in [
+        ZkSpecId::AtlasV3,
+        ZkSpecId::AtlasV4,
+        ZkSpecId::AtlasV5,
+        ZkSpecId::AtlasV6,
+    ] {
         let (slot, balance, _) = execute_gasprice(spec, 0, false, 2, Some(0));
         assert_eq!(slot, U256::ONE);
         assert_eq!(balance, U256::from(INITIAL_BALANCE));

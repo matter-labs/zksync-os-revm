@@ -32,8 +32,11 @@ pub enum ZkSpecId {
     /// ZKsync OS 0.6.0 (protocol v34). The AtlasV4 EVM rules; the chain config
     /// adds L1 transaction filtering and large contracts, which reach REVM as
     /// operator hints and `CfgEnv::limit_contract_code_size`.
-    #[default]
     AtlasV5,
+    /// The ZKsync OS release after 0.6.0 (protocol v36). AtlasV5 plus the
+    /// L1SLOAD precompile on chains that enable it.
+    #[default]
+    AtlasV6,
 }
 
 impl ZkSpecId {
@@ -41,7 +44,7 @@ impl ZkSpecId {
     pub const fn into_eth_spec(self) -> SpecId {
         match self {
             Self::AtlasV1 | Self::AtlasV2 | Self::AtlasV3 => SpecId::CANCUN,
-            Self::AtlasV4 | Self::AtlasV5 => SpecId::OSAKA,
+            Self::AtlasV4 | Self::AtlasV5 | Self::AtlasV6 => SpecId::OSAKA,
         }
     }
 
@@ -69,6 +72,11 @@ impl ZkSpecId {
     pub const fn borrows_eip7702_from_prague(self) -> bool {
         self.supports_eip7702() && !self.into_eth_spec().is_enabled_in(SpecId::PRAGUE)
     }
+
+    /// Whether the spec has the L1SLOAD precompile; a chain still has to enable it.
+    pub const fn supports_l1sload(self) -> bool {
+        ZkSpecId::AtlasV6.is_enabled_in(self)
+    }
 }
 
 impl From<ZkSpecId> for SpecId {
@@ -87,6 +95,7 @@ impl FromStr for ZkSpecId {
             name::ATLASV3 => Ok(ZkSpecId::AtlasV3),
             name::ATLASV4 => Ok(ZkSpecId::AtlasV4),
             name::ATLASV5 => Ok(ZkSpecId::AtlasV5),
+            name::ATLASV6 => Ok(ZkSpecId::AtlasV6),
             _ => Err(UnknownHardfork),
         }
     }
@@ -100,6 +109,7 @@ impl From<ZkSpecId> for &'static str {
             ZkSpecId::AtlasV3 => name::ATLASV3,
             ZkSpecId::AtlasV4 => name::ATLASV4,
             ZkSpecId::AtlasV5 => name::ATLASV5,
+            ZkSpecId::AtlasV6 => name::ATLASV6,
         }
     }
 }
@@ -112,6 +122,7 @@ pub mod name {
     pub const ATLASV3: &str = "AtlasV3";
     pub const ATLASV4: &str = "AtlasV4";
     pub const ATLASV5: &str = "AtlasV5";
+    pub const ATLASV6: &str = "AtlasV6";
 }
 
 #[cfg(test)]
@@ -119,8 +130,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn atlas_v5_is_the_latest_spec_and_runs_osaka() {
-        assert_eq!(ZkSpecId::default(), ZkSpecId::AtlasV5);
+    fn atlas_v5_runs_osaka() {
         assert_eq!(ZkSpecId::AtlasV5.into_eth_spec(), SpecId::OSAKA);
         assert!(ZkSpecId::AtlasV4.is_enabled_in(ZkSpecId::AtlasV5));
         assert!(!ZkSpecId::AtlasV5.is_enabled_in(ZkSpecId::AtlasV4));
@@ -128,5 +138,15 @@ mod tests {
         assert!(!ZkSpecId::AtlasV5.borrows_eip7702_from_prague());
         assert_eq!("AtlasV5".parse::<ZkSpecId>().ok(), Some(ZkSpecId::AtlasV5));
         assert_eq!(<&'static str>::from(ZkSpecId::AtlasV5), "AtlasV5");
+    }
+
+    #[test]
+    fn atlas_v6_is_the_latest_spec_and_adds_l1sload() {
+        assert_eq!(ZkSpecId::default(), ZkSpecId::AtlasV6);
+        assert_eq!(ZkSpecId::AtlasV6.into_eth_spec(), SpecId::OSAKA);
+        assert!(ZkSpecId::AtlasV6.supports_l1sload());
+        assert!(!ZkSpecId::AtlasV5.supports_l1sload());
+        assert_eq!("AtlasV6".parse::<ZkSpecId>().ok(), Some(ZkSpecId::AtlasV6));
+        assert_eq!(<&'static str>::from(ZkSpecId::AtlasV6), "AtlasV6");
     }
 }
