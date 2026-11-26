@@ -317,6 +317,14 @@ where
         calldata[4..36].copy_from_slice(&l1_chain_id.to_be_bytes::<32>());
         calldata[36..68].copy_from_slice(&amount.to_be_bytes::<32>());
 
+        // ZKsync OS's `run_single_interaction` reads the caller's account before
+        // the call, which leaves it warm for the rest of the transaction. The
+        // system call below loads only its target, so load the caller here.
+        evm.ctx()
+            .journal_mut()
+            .load_account(L2_BASE_TOKEN_ADDRESS)
+            .map_err(|err| ERROR::from_string(format!("failed to load L2BaseToken: {err:?}")))?;
+
         evm.ctx()
             .set_tx(<EVM::Context as ContextTr>::Tx::new_system_tx_with_caller(
                 L2_BASE_TOKEN_ADDRESS,
@@ -634,11 +642,33 @@ where
                     // even when there is no upfront treasury transfer.
                     journal.load_account_with_code_mut(tx.caller())?;
 
+                    // From AtlasV4 (ZKsync OS v0.4.0) on, the bootloader reads the
+                    // treasury and the refund recipient as EVM accounts before user
+                    // execution, so that the mandatory post-execution balance updates
+                    // cannot run out of the transaction-local cache budget. Those reads
+                    // warm both accounts for the rest of the transaction, so replay them
+                    // here: without them the user's first access to either account is
+                    // priced cold here and warm in ZKsync OS.
+                    if ZkSpecId::AtlasV4.is_enabled_in(spec_id) {
+                        let refund_recipient = tx.refund_recipient().ok_or_else(|| {
+                            Self::Error::from_string(
+                                "Refund recipient is missing for L1 -> L2 tx".into(),
+                            )
+                        })?;
+                        journal.load_account(BASE_TOKEN_HOLDER_ADDRESS)?;
+                        journal.load_account(refund_recipient)?;
+                    }
+
                     // On AtlasV3, `mint` (reserved[0]) is split into:
                     // 1) max fee commitment (kept in treasury until post-execution)
                     // 2) upfront transfer to caller (available during execution)
                     let fee_flow = Self::atlas_l1_fee_flow(tx, basefee, spec_id);
-                    if fee_flow.upfront_transfer > U256::ZERO {
+                    // From AtlasV4 (ZKsync OS v0.4.0) on, the bootloader runs the value
+                    // mint even for a zero amount, so the asset-tracker notification, and
+                    // every account and slot it touches, is warm during user execution
+                    // whatever the split of the deposit.
+                    let mints_zero_value = ZkSpecId::AtlasV4.is_enabled_in(spec_id);
+                    if fee_flow.upfront_transfer > U256::ZERO || mints_zero_value {
                         // Match zkOS semantics: the upfront asset-tracker notification and
                         // treasury transfer form one atomic value-mint step. They must either
                         // both persist or both roll back together.
@@ -653,12 +683,18 @@ where
                                 fee_flow.upfront_transfer,
                             )?;
 
-                            let (tx, journal) = evm.ctx().tx_journal_mut();
-                            journal.transfer(
-                                BASE_TOKEN_HOLDER_ADDRESS,
-                                tx.caller(),
-                                fee_flow.upfront_transfer,
-                            )?;
+                            // A zero transfer moves no balance and ZKsync OS persists
+                            // nothing for it, while `transfer` would still mark the
+                            // caller touched here. The treasury is already warm from the
+                            // AtlasV4 reads above.
+                            if fee_flow.upfront_transfer > U256::ZERO {
+                                let (tx, journal) = evm.ctx().tx_journal_mut();
+                                journal.transfer(
+                                    BASE_TOKEN_HOLDER_ADDRESS,
+                                    tx.caller(),
+                                    fee_flow.upfront_transfer,
+                                )?;
+                            }
                             Ok(())
                         })();
 
@@ -914,6 +950,7 @@ mod tests {
             transaction::{Authorization, RecoveredAuthority, RecoveredAuthorization},
         },
         database::{CacheDB, EmptyDB},
+        interpreter::gas::{COLD_ACCOUNT_ACCESS_COST, WARM_STORAGE_READ_COST},
         primitives::{Address, B256, TxKind, address},
         state::{AccountInfo, Bytecode},
     };
@@ -922,17 +959,23 @@ mod tests {
     const TARGET: Address = address!("0000000000000000000000000000000000001111");
     const REFUND_RECIPIENT: Address = address!("0000000000000000000000000000000000002222");
     const AUTHORITY: Address = address!("0000000000000000000000000000000000003333");
+    /// An account only the asset tracker reads.
+    const TRACKER_DEPENDENCY: Address = address!("0000000000000000000000000000000000004444");
     const MESSAGE: [u8; 32] = [0xaa; 32];
     const TX_GAS_LIMIT: u64 = 1_000_000;
     const TX_GAS_PRICE: u128 = 1;
 
     const OP_STOP: u8 = 0x00;
+    const OP_SUB: u8 = 0x03;
+    const OP_BALANCE: u8 = 0x31;
     const OP_POP: u8 = 0x50;
     const OP_MSTORE: u8 = 0x52;
+    const OP_SSTORE: u8 = 0x55;
     const OP_GAS: u8 = 0x5a;
     const OP_PUSH1: u8 = 0x60;
     const OP_PUSH20: u8 = 0x73;
     const OP_PUSH32: u8 = 0x7f;
+    const OP_SWAP1: u8 = 0x90;
     const OP_CALL: u8 = 0xf1;
 
     /// Code that writes `content` into memory at `offset`.
@@ -1048,6 +1091,192 @@ mod tests {
             fee_logs
                 .iter()
                 .all(|log| log.sender == L1_MESSENGER_ADDRESS)
+        );
+    }
+
+    /// Gas the probe in [`balance_probe_code`] spends besides `BALANCE`
+    /// itself: `PUSH20` (3), `POP` (2) and the closing `GAS` (2).
+    const BALANCE_PROBE_OVERHEAD: u64 = 7;
+
+    /// Code that stores in slot 0 the gas spent by `BALANCE(probe)`, plus
+    /// [`BALANCE_PROBE_OVERHEAD`].
+    fn balance_probe_code(probe: Address) -> Bytes {
+        let mut code = vec![OP_GAS, OP_PUSH20];
+        code.extend_from_slice(probe.as_slice());
+        code.extend_from_slice(&[
+            OP_BALANCE, OP_POP, OP_GAS, OP_SWAP1, OP_SUB, OP_PUSH1, 0, OP_SSTORE, OP_STOP,
+        ]);
+        code.into()
+    }
+
+    /// Run one L1 priority transaction whose target reads the balance of
+    /// `probe`, and return the gas that `BALANCE` cost it.
+    ///
+    /// The mint covers the prepaid fee plus `upfront_transfer`. The asset
+    /// tracker reads the balance of [`TRACKER_DEPENDENCY`] on every
+    /// notification, so that account is warm exactly when a notification runs
+    /// before execution.
+    fn l1_balance_probe_cost(spec: ZkSpecId, upfront_transfer: U256, probe: Address) -> u64 {
+        let mut tracker_code = vec![OP_PUSH20];
+        tracker_code.extend_from_slice(TRACKER_DEPENDENCY.as_slice());
+        tracker_code.extend_from_slice(&[OP_BALANCE, OP_POP, OP_STOP]);
+
+        let mut database = CacheDB::new(EmptyDB::default());
+        database.insert_account_info(
+            BASE_TOKEN_HOLDER_ADDRESS,
+            AccountInfo {
+                balance: U256::from(1_000_000_000_000_000_000u64),
+                ..Default::default()
+            },
+        );
+        database.insert_account_info(
+            L2_ASSET_TRACKER_ADDRESS,
+            AccountInfo {
+                code: Some(Bytecode::new_raw(tracker_code.into())),
+                ..Default::default()
+            },
+        );
+        database.insert_account_info(
+            TARGET,
+            AccountInfo {
+                code: Some(Bytecode::new_raw(balance_probe_code(probe))),
+                ..Default::default()
+            },
+        );
+
+        let mut evm = zk_context(database, spec).build_zk();
+        evm.0.ctx.journaled_state.set_tx_number(0);
+        let mint = U256::from(TX_GAS_LIMIT) * U256::from(TX_GAS_PRICE) + upfront_transfer;
+        let transaction = ZKsyncTx::builder()
+            .base(
+                TxEnv::builder()
+                    .tx_type(Some(L1_PRIORITY_TRANSACTION_TYPE))
+                    .caller(CALLER)
+                    .kind(TxKind::Call(TARGET))
+                    .gas_limit(TX_GAS_LIMIT)
+                    .gas_price(TX_GAS_PRICE),
+            )
+            .mint(mint)
+            .refund_recipient(Some(REFUND_RECIPIENT))
+            .tx_hash(B256::from([0x22; 32]))
+            .build_fill()
+            .expect("transaction builds");
+        let outcome = evm.transact(transaction).expect("transaction runs");
+        assert!(
+            outcome.result.is_success(),
+            "{spec:?}: {:?}",
+            outcome.result
+        );
+
+        let spent = outcome
+            .state
+            .get(&TARGET)
+            .and_then(|account| account.storage.get(&U256::ZERO))
+            .expect("the probe stores its cost")
+            .present_value;
+        u64::try_from(spent).expect("the probe cost fits in u64") - BALANCE_PROBE_OVERHEAD
+    }
+
+    #[test]
+    fn l1_balance_probe_prices_an_untouched_account_cold() {
+        for spec in [ZkSpecId::AtlasV3, ZkSpecId::AtlasV4, ZkSpecId::AtlasV5] {
+            for upfront_transfer in [U256::ZERO, U256::from(1)] {
+                assert_eq!(
+                    l1_balance_probe_cost(spec, upfront_transfer, AUTHORITY),
+                    COLD_ACCOUNT_ACCESS_COST,
+                    "{spec:?}, upfront transfer {upfront_transfer}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn l1_transaction_sees_the_treasury_and_refund_recipient_warm_from_atlas_v4() {
+        for spec in [ZkSpecId::AtlasV4, ZkSpecId::AtlasV5] {
+            for upfront_transfer in [U256::ZERO, U256::from(1)] {
+                for account in [BASE_TOKEN_HOLDER_ADDRESS, REFUND_RECIPIENT] {
+                    assert_eq!(
+                        l1_balance_probe_cost(spec, upfront_transfer, account),
+                        WARM_STORAGE_READ_COST,
+                        "{spec:?}, upfront transfer {upfront_transfer}, {account}"
+                    );
+                }
+            }
+        }
+
+        // ZKsync OS v0.3.x reads the refund recipient only after execution,
+        // and the treasury before it only for a non-zero upfront transfer.
+        let spec = ZkSpecId::AtlasV3;
+        assert_eq!(
+            l1_balance_probe_cost(spec, U256::from(1), REFUND_RECIPIENT),
+            COLD_ACCOUNT_ACCESS_COST
+        );
+        assert_eq!(
+            l1_balance_probe_cost(spec, U256::ZERO, BASE_TOKEN_HOLDER_ADDRESS),
+            COLD_ACCOUNT_ACCESS_COST
+        );
+        assert_eq!(
+            l1_balance_probe_cost(spec, U256::from(1), BASE_TOKEN_HOLDER_ADDRESS),
+            WARM_STORAGE_READ_COST
+        );
+    }
+
+    #[test]
+    fn l1_transaction_notifies_the_asset_tracker_before_execution_from_atlas_v4() {
+        // The tracker and the account it reads are warm only if the value-mint
+        // notification ran before execution.
+        for spec in [ZkSpecId::AtlasV4, ZkSpecId::AtlasV5] {
+            for upfront_transfer in [U256::ZERO, U256::from(1)] {
+                for account in [L2_ASSET_TRACKER_ADDRESS, TRACKER_DEPENDENCY] {
+                    assert_eq!(
+                        l1_balance_probe_cost(spec, upfront_transfer, account),
+                        WARM_STORAGE_READ_COST,
+                        "{spec:?}, upfront transfer {upfront_transfer}, {account}"
+                    );
+                }
+            }
+        }
+
+        // ZKsync OS v0.3.x notifies the tracker before execution only for a
+        // non-zero upfront transfer.
+        let spec = ZkSpecId::AtlasV3;
+        for account in [L2_ASSET_TRACKER_ADDRESS, TRACKER_DEPENDENCY] {
+            assert_eq!(
+                l1_balance_probe_cost(spec, U256::ZERO, account),
+                COLD_ACCOUNT_ACCESS_COST,
+                "{account}"
+            );
+            assert_eq!(
+                l1_balance_probe_cost(spec, U256::from(1), account),
+                WARM_STORAGE_READ_COST,
+                "{account}"
+            );
+        }
+    }
+
+    #[test]
+    fn l1_transaction_sees_the_notification_caller_warm() {
+        // ZKsync OS reads the caller of every tracker notification, the L2 base
+        // token, before the call, so it is warm exactly when a notification ran
+        // before execution.
+        for spec in [ZkSpecId::AtlasV4, ZkSpecId::AtlasV5] {
+            for upfront_transfer in [U256::ZERO, U256::from(1)] {
+                assert_eq!(
+                    l1_balance_probe_cost(spec, upfront_transfer, L2_BASE_TOKEN_ADDRESS),
+                    WARM_STORAGE_READ_COST,
+                    "{spec:?}, upfront transfer {upfront_transfer}"
+                );
+            }
+        }
+
+        let spec = ZkSpecId::AtlasV3;
+        assert_eq!(
+            l1_balance_probe_cost(spec, U256::ZERO, L2_BASE_TOKEN_ADDRESS),
+            COLD_ACCOUNT_ACCESS_COST
+        );
+        assert_eq!(
+            l1_balance_probe_cost(spec, U256::from(1), L2_BASE_TOKEN_ADDRESS),
+            WARM_STORAGE_READ_COST
         );
     }
 
