@@ -655,7 +655,12 @@ where
                     // 1) max fee commitment (kept in treasury until post-execution)
                     // 2) upfront transfer to caller (available during execution)
                     let fee_flow = Self::atlas_l1_fee_flow(tx, basefee, spec_id);
-                    if fee_flow.upfront_transfer > U256::ZERO {
+                    // From AtlasV4 (ZKsync OS v0.4.0) on, the bootloader runs the value
+                    // mint even for a zero amount, so the asset-tracker notification, and
+                    // every account and slot it touches, is warm during user execution
+                    // whatever the split of the deposit.
+                    let mints_zero_value = ZkSpecId::AtlasV4.is_enabled_in(spec_id);
+                    if fee_flow.upfront_transfer > U256::ZERO || mints_zero_value {
                         // Match zkOS semantics: the upfront asset-tracker notification and
                         // treasury transfer form one atomic value-mint step. They must either
                         // both persist or both roll back together.
@@ -670,12 +675,18 @@ where
                                 fee_flow.upfront_transfer,
                             )?;
 
-                            let (tx, journal) = evm.ctx().tx_journal_mut();
-                            journal.transfer(
-                                BASE_TOKEN_HOLDER_ADDRESS,
-                                tx.caller(),
-                                fee_flow.upfront_transfer,
-                            )?;
+                            // A zero transfer moves no balance and ZKsync OS persists
+                            // nothing for it, while `transfer` would still mark the
+                            // caller touched here. The treasury is already warm from the
+                            // AtlasV4 reads above.
+                            if fee_flow.upfront_transfer > U256::ZERO {
+                                let (tx, journal) = evm.ctx().tx_journal_mut();
+                                journal.transfer(
+                                    BASE_TOKEN_HOLDER_ADDRESS,
+                                    tx.caller(),
+                                    fee_flow.upfront_transfer,
+                                )?;
+                            }
                             Ok(())
                         })();
 
@@ -1200,6 +1211,39 @@ mod tests {
             l1_balance_probe_cost(spec, U256::from(1), BASE_TOKEN_HOLDER_ADDRESS),
             WARM_STORAGE_READ_COST
         );
+    }
+
+    #[test]
+    fn l1_transaction_notifies_the_asset_tracker_before_execution_from_atlas_v4() {
+        // The tracker and the account it reads are warm only if the value-mint
+        // notification ran before execution.
+        for spec in [ZkSpecId::AtlasV4, ZkSpecId::AtlasV5] {
+            for upfront_transfer in [U256::ZERO, U256::from(1)] {
+                for account in [L2_ASSET_TRACKER_ADDRESS, TRACKER_DEPENDENCY] {
+                    assert_eq!(
+                        l1_balance_probe_cost(spec, upfront_transfer, account),
+                        WARM_STORAGE_READ_COST,
+                        "{spec:?}, upfront transfer {upfront_transfer}, {account}"
+                    );
+                }
+            }
+        }
+
+        // ZKsync OS v0.3.x notifies the tracker before execution only for a
+        // non-zero upfront transfer.
+        let spec = ZkSpecId::AtlasV3;
+        for account in [L2_ASSET_TRACKER_ADDRESS, TRACKER_DEPENDENCY] {
+            assert_eq!(
+                l1_balance_probe_cost(spec, U256::ZERO, account),
+                COLD_ACCOUNT_ACCESS_COST,
+                "{account}"
+            );
+            assert_eq!(
+                l1_balance_probe_cost(spec, U256::from(1), account),
+                WARM_STORAGE_READ_COST,
+                "{account}"
+            );
+        }
     }
 
     /// Whether the authority of the authorization holds a state entry.
