@@ -317,6 +317,14 @@ where
         calldata[4..36].copy_from_slice(&l1_chain_id.to_be_bytes::<32>());
         calldata[36..68].copy_from_slice(&amount.to_be_bytes::<32>());
 
+        // ZKsync OS's `run_single_interaction` reads the caller's account before
+        // the call, which leaves it warm for the rest of the transaction. The
+        // system call below loads only its target, so load the caller here.
+        evm.ctx()
+            .journal_mut()
+            .load_account(L2_BASE_TOKEN_ADDRESS)
+            .map_err(|err| ERROR::from_string(format!("failed to load L2BaseToken: {err:?}")))?;
+
         evm.ctx()
             .set_tx(<EVM::Context as ContextTr>::Tx::new_system_tx_with_caller(
                 L2_BASE_TOKEN_ADDRESS,
@@ -1244,6 +1252,32 @@ mod tests {
                 "{account}"
             );
         }
+    }
+
+    #[test]
+    fn l1_transaction_sees_the_notification_caller_warm() {
+        // ZKsync OS reads the caller of every tracker notification, the L2 base
+        // token, before the call, so it is warm exactly when a notification ran
+        // before execution.
+        for spec in [ZkSpecId::AtlasV4, ZkSpecId::AtlasV5] {
+            for upfront_transfer in [U256::ZERO, U256::from(1)] {
+                assert_eq!(
+                    l1_balance_probe_cost(spec, upfront_transfer, L2_BASE_TOKEN_ADDRESS),
+                    WARM_STORAGE_READ_COST,
+                    "{spec:?}, upfront transfer {upfront_transfer}"
+                );
+            }
+        }
+
+        let spec = ZkSpecId::AtlasV3;
+        assert_eq!(
+            l1_balance_probe_cost(spec, U256::ZERO, L2_BASE_TOKEN_ADDRESS),
+            COLD_ACCOUNT_ACCESS_COST
+        );
+        assert_eq!(
+            l1_balance_probe_cost(spec, U256::from(1), L2_BASE_TOKEN_ADDRESS),
+            WARM_STORAGE_READ_COST
+        );
     }
 
     /// Whether the authority of the authorization holds a state entry.
